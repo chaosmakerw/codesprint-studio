@@ -1,0 +1,22 @@
+name: 问题反馈
+description: 使用虚构资料复现，不上传密钥和个人记录
+body:
+  - type: textarea
+    id: behavior
+    attributes:
+      label: 问题与预期
+      description: 描述发生了什么，以及你希望如何工作。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请使用原创示例或虚构输入；隐去私人路径。
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: 环境
+      placeholder: 操作系统、Python 版本、浏览器版本

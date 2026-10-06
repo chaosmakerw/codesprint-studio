@@ -1,0 +1,818 @@
+[
+  {
+    "id": "demo-01",
+    "topic": "java",
+    "type": "single",
+    "title": "可变键的查找",
+    "prompt": "某个对象作为 HashMap 的键后，参与 equals 和 hashCode 的字段被修改，再用同一对象查询。最合理的解释是什么？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "查找可能进入不同的桶，不能保证找到原条目"
+      },
+      {
+        "id": "b",
+        "text": "同一个对象的引用保证总能找到"
+      },
+      {
+        "id": "c",
+        "text": "HashMap 会自动追踪键字段的变化"
+      },
+      {
+        "id": "d",
+        "text": "遇到查找失败只需要多重试几次"
+      }
+    ],
+    "answer": [
+      "a"
+    ],
+    "explanation": "对象被用作键后，不宜再修改参与 equals 和 hashCode 的字段，否则查找可能进入不同的桶，找不到原有条目。\n桶位置由当前键哈希计算，字段改变破坏放入时的定位约定。",
+    "option_explanations": {
+      "a": "桶位置由当前键哈希计算，字段改变破坏放入时的定位约定。",
+      "b": "对象引用相同不能修复桶定位已经改变的问题。",
+      "c": "HashMap 不会监听任意键对象的内部字段变化。",
+      "d": "这里是对象约定错误，重试不能恢复原来的键状态。"
+    },
+    "evidence_quote": "对象被用作键后，不宜再修改参与 equals 和 hashCode 的字段，否则查找可能进入不同的桶，找不到原有条目。",
+    "keywords": [
+      "HashMap",
+      "hashCode"
+    ],
+    "focus": "scenario",
+    "source_key": "demo:java-collections",
+    "source_section": "可变键的查找",
+    "source_sha256": "ca3e1dc4d6c4f1f12d41123673de540509b6981051d0316b5998e103ed196be4"
+  },
+  {
+    "id": "demo-02",
+    "topic": "java",
+    "type": "multiple",
+    "title": "逻辑相等与哈希碰撞",
+    "prompt": "设计一个键类型时，哪些约定可以成立？请选择所有正确说法。",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "equals 相等的两个键应具有相同 hashCode"
+      },
+      {
+        "id": "b",
+        "text": "不同对象只要 hashCode 相同就一定 equals 相等"
+      },
+      {
+        "id": "c",
+        "text": "哈希值相同仍可能是两个不相等的键"
+      },
+      {
+        "id": "d",
+        "text": "哈希值可以作为业务用户的唯一身份"
+      }
+    ],
+    "answer": [
+      "a",
+      "c"
+    ],
+    "explanation": "键的 equals 相等时，hashCode 必须一致；哈希相同不保证 equals 相等。碰撞可能发生，不能把哈希值当作对象的唯一身份。\nequals 相等的对象应有相同 hashCode，才能满足哈希容器的定位约定。 哈希函数的取值有限，碰撞并不表示业务对象相等。",
+    "option_explanations": {
+      "a": "equals 相等的对象应有相同 hashCode，才能满足哈希容器的定位约定。",
+      "b": "相同哈希可能来自碰撞，不能直接推出逻辑相等。",
+      "c": "哈希函数的取值有限，碰撞并不表示业务对象相等。",
+      "d": "哈希不具备可信身份认证与全局唯一性的保证。"
+    },
+    "evidence_quote": "键的 equals 相等时，hashCode 必须一致；哈希相同不保证 equals 相等。碰撞可能发生，不能把哈希值当作对象的唯一身份。",
+    "keywords": [
+      "equals",
+      "hashCode"
+    ],
+    "focus": "mechanism",
+    "source_key": "demo:java-collections",
+    "source_section": "逻辑相等与哈希碰撞",
+    "source_sha256": "ca3e1dc4d6c4f1f12d41123673de540509b6981051d0316b5998e103ed196be4"
+  },
+  {
+    "id": "demo-03",
+    "topic": "java",
+    "type": "single",
+    "title": "并发容器的复合计数",
+    "prompt": "两个线程分别对 ConcurrentHashMap 执行 get 后加一再 put，为何计数仍可能少于预期？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "并发容器禁止任何整数值"
+      },
+      {
+        "id": "b",
+        "text": "线程安全容器让多次方法调用自动成为一个事务"
+      },
+      {
+        "id": "c",
+        "text": "get 和 put 之间可能交错，应选择符合计数语义的原子更新方法"
+      },
+      {
+        "id": "d",
+        "text": "只有设置更大的初始容量才能保证计数"
+      }
+    ],
+    "answer": [
+      "c"
+    ],
+    "explanation": "ConcurrentHashMap 提供并发访问能力，但先 get 再 put 组成的两步逻辑不会因为容器并发安全而自动成为一个原子操作。\n两个线程可能读取同一旧值，merge 等方法可表达原子更新。",
+    "option_explanations": {
+      "a": "整数值本身合法，问题发生在多个操作组成的更新序列。",
+      "b": "单次方法的并发安全并不覆盖任意调用之间的复合语义。",
+      "c": "两个线程可能读取同一旧值，merge 等方法可表达原子更新。",
+      "d": "容量主要影响存储和扩容，不能修复更新之间的交错。"
+    },
+    "evidence_quote": "ConcurrentHashMap 提供并发访问能力，但先 get 再 put 组成的两步逻辑不会因为容器并发安全而自动成为一个原子操作。",
+    "keywords": [
+      "ConcurrentHashMap",
+      "get",
+      "put"
+    ],
+    "focus": "boundary",
+    "source_key": "demo:java-collections",
+    "source_section": "并发容器的复合计数",
+    "source_sha256": "ca3e1dc4d6c4f1f12d41123673de540509b6981051d0316b5998e103ed196be4"
+  },
+  {
+    "id": "demo-04",
+    "topic": "concurrency",
+    "type": "single",
+    "title": "volatile 计数",
+    "prompt": "多个线程对 volatile int counter 执行 counter++，应该预期什么？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "volatile 已经保证自增整体原子"
+      },
+      {
+        "id": "b",
+        "text": "仍可能丢失更新，因为自增包含多个步骤"
+      },
+      {
+        "id": "c",
+        "text": "把所有字段都加 volatile 就等于一把锁"
+      },
+      {
+        "id": "d",
+        "text": "结果偏小只能说明打印代码有错误"
+      }
+    ],
+    "answer": [
+      "b"
+    ],
+    "explanation": "volatile 可以为变量读写建立必要的可见性和顺序关系，但 counter++ 仍包含读取、加一和写回三个步骤，不是一个原子操作。\n多个线程可读取同一旧值，再把相同的新值写回。",
+    "option_explanations": {
+      "a": "volatile 的读写可见性不能把复合自增变成原子操作。",
+      "b": "多个线程可读取同一旧值，再把相同的新值写回。",
+      "c": "多个字段的业务不变量需要整体同步或状态设计。",
+      "d": "计数丢失可以真实发生，不能未经验证归因于打印。"
+    },
+    "evidence_quote": "volatile 可以为变量读写建立必要的可见性和顺序关系，但 counter++ 仍包含读取、加一和写回三个步骤，不是一个原子操作。",
+    "keywords": [
+      "volatile",
+      "counter"
+    ],
+    "focus": "mechanism",
+    "source_key": "demo:java-concurrency",
+    "source_section": "volatile 计数",
+    "source_sha256": "70ecc0d64ca09570f2b281213485dd62535696a580c20b89c5fac5fcb11a2555"
+  },
+  {
+    "id": "demo-05",
+    "topic": "concurrency",
+    "type": "single",
+    "title": "队列积压与最大线程数",
+    "prompt": "核心线程已经忙碌，线程池采用无界队列。仅增大 maximumPoolSize 为什么通常没有解决积压？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "任务永远不会进入工作队列"
+      },
+      {
+        "id": "b",
+        "text": "maximumPoolSize 会禁止创建核心线程"
+      },
+      {
+        "id": "c",
+        "text": "Java 的线程池没有拒绝策略"
+      },
+      {
+        "id": "d",
+        "text": "流程通常先入队，队列无法接收时才尝试扩展到最大线程数"
+      }
+    ],
+    "answer": [
+      "d"
+    ],
+    "explanation": "ThreadPoolExecutor 在典型接收流程中先尝试创建核心线程，再入队，队列无法接收时才尝试扩展到最大线程数，最后进入拒绝策略。\n无界队列往往可以继续接收任务，因此扩展分支不易触发。",
+    "option_explanations": {
+      "a": "核心线程忙碌时，典型流程会尝试把任务放到队列。",
+      "b": "最大线程数并不取消核心线程的创建与执行职责。",
+      "c": "ThreadPoolExecutor 有拒绝策略，容量设计仍须考虑。",
+      "d": "无界队列往往可以继续接收任务，因此扩展分支不易触发。"
+    },
+    "evidence_quote": "ThreadPoolExecutor 在典型接收流程中先尝试创建核心线程，再入队，队列无法接收时才尝试扩展到最大线程数，最后进入拒绝策略。",
+    "keywords": [
+      "ThreadPoolExecutor",
+      "maximumPoolSize"
+    ],
+    "focus": "debug",
+    "source_key": "demo:java-concurrency",
+    "source_section": "队列积压与最大线程数",
+    "source_sha256": "70ecc0d64ca09570f2b281213485dd62535696a580c20b89c5fac5fcb11a2555"
+  },
+  {
+    "id": "demo-06",
+    "topic": "concurrency",
+    "type": "multiple",
+    "title": "虚拟线程与下游保护",
+    "prompt": "大量虚拟线程调用慢模型接口，下面哪些设计与资料中的边界相符？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "虚拟线程成本降低不意味着模型供应商并发无限"
+      },
+      {
+        "id": "b",
+        "text": "Semaphore 可以限制正在执行的下游请求数"
+      },
+      {
+        "id": "c",
+        "text": "即使没有拿到许可，也应在 finally 里 release"
+      },
+      {
+        "id": "d",
+        "text": "只改为虚拟线程就能自动满足供应商额度"
+      }
+    ],
+    "answer": [
+      "a",
+      "b"
+    ],
+    "explanation": "虚拟线程可以降低大量阻塞任务等待时的线程成本，但不会自动限制外部模型服务的并发或额度。可以用 Semaphore 约束正在执行的下游请求，在 finally 中释放已经获取的许可\n等待时的线程成本与外部服务容量是不同约束。 许可数可以表达下游并发上限，但需要正确获取与释放。",
+    "option_explanations": {
+      "a": "等待时的线程成本与外部服务容量是不同约束。",
+      "b": "许可数可以表达下游并发上限，但需要正确获取与释放。",
+      "c": "释放未获取的许可会错误增加可用容量，破坏上限。",
+      "d": "额度与限流需要独立设计，线程类型不会自动实现。"
+    },
+    "evidence_quote": "虚拟线程可以降低大量阻塞任务等待时的线程成本，但不会自动限制外部模型服务的并发或额度。可以用 Semaphore 约束正在执行的下游请求，在 finally 中释放已经获取的许可",
+    "keywords": [
+      "虚拟线程",
+      "Semaphore"
+    ],
+    "focus": "design",
+    "source_key": "demo:java-concurrency",
+    "source_section": "虚拟线程与下游保护",
+    "source_sha256": "70ecc0d64ca09570f2b281213485dd62535696a580c20b89c5fac5fcb11a2555"
+  },
+  {
+    "id": "demo-07",
+    "topic": "spring",
+    "type": "single",
+    "title": "自调用的事务入口",
+    "prompt": "使用常见代理式事务，一个方法通过 this 调用自身另一个标注事务的方法。为什么不能只看注解断言事务生效？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "内部调用通常不会经过负责事务拦截的代理"
+      },
+      {
+        "id": "b",
+        "text": "任何带注解的方法都与调用路径无关"
+      },
+      {
+        "id": "c",
+        "text": "把方法名改为 transaction 就能开启事务"
+      },
+      {
+        "id": "d",
+        "text": "是否有事务只取决于返回值是否为 true"
+      }
+    ],
+    "answer": [
+      "a"
+    ],
+    "explanation": "同一个对象内使用 this 调用自身另一个标注事务的方法，通常不会经过该代理。这里的关键是调用路径，而不是“代码里存在注解就一定生效”。\n事务行为依赖实际调用链，自调用通常绕过代理入口。",
+    "option_explanations": {
+      "a": "事务行为依赖实际调用链，自调用通常绕过代理入口。",
+      "b": "注解存在不等于拦截器已经参与了这次方法执行。",
+      "c": "方法名称不代替代理、事务管理器与实际配置。",
+      "d": "返回一个布尔值不能证明数据库提交或回滚边界。"
+    },
+    "evidence_quote": "同一个对象内使用 this 调用自身另一个标注事务的方法，通常不会经过该代理。这里的关键是调用路径，而不是“代码里存在注解就一定生效”。",
+    "keywords": [
+      "this",
+      "代理"
+    ],
+    "focus": "scenario",
+    "source_key": "demo:spring-transactions",
+    "source_section": "自调用的事务入口",
+    "source_sha256": "1a1d86c0d384689801ce0264477afe3ff665b91e1e6efa9aad9e61be948bd7ee"
+  },
+  {
+    "id": "demo-08",
+    "topic": "spring",
+    "type": "multiple",
+    "title": "回滚不是错误页面",
+    "prompt": "业务要求普通受检异常也回滚。下面哪些做法正确？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "明确配置 rollbackFor 并验证数据库实际状态"
+      },
+      {
+        "id": "b",
+        "text": "只要浏览器显示错误文字就证明已经回滚"
+      },
+      {
+        "id": "c",
+        "text": "确认异常是否被内部捕获后正常返回"
+      },
+      {
+        "id": "d",
+        "text": "Mock 验证服务被调用即可证明真实数据库回滚"
+      }
+    ],
+    "answer": [
+      "a",
+      "c"
+    ],
+    "explanation": "Spring 声明式事务默认对 RuntimeException 和 Error 回滚，对普通受检异常不默认回滚。若业务需要受检异常触发回滚，应明确配置 rollbackFor，并在测试里检查实际数据状态。\n默认规则不覆盖所有受检异常，需要按业务明确配置 rollbackFor 并测试数据库状态。 捕获后正常返回会影响事务拦截器看到的失败信号。",
+    "option_explanations": {
+      "a": "默认规则不覆盖所有受检异常，需要按业务明确配置 rollbackFor 并测试数据库状态。",
+      "b": "页面文案不说明事务拦截器看到了什么异常和数据状态。",
+      "c": "捕获后正常返回会影响事务拦截器看到的失败信号。",
+      "d": "Mock 调用验证不执行真实数据库提交与回滚。"
+    },
+    "evidence_quote": "Spring 声明式事务默认对 RuntimeException 和 Error 回滚，对普通受检异常不默认回滚。若业务需要受检异常触发回滚，应明确配置 rollbackFor，并在测试里检查实际数据状态。",
+    "keywords": [
+      "RuntimeException",
+      "rollbackFor"
+    ],
+    "focus": "boundary",
+    "source_key": "demo:spring-transactions",
+    "source_section": "回滚不是错误页面",
+    "source_sha256": "1a1d86c0d384689801ce0264477afe3ff665b91e1e6efa9aad9e61be948bd7ee"
+  },
+  {
+    "id": "demo-09",
+    "topic": "spring",
+    "type": "single",
+    "title": "数据库事务与外部调用",
+    "prompt": "方法已经给外部模型发了请求，之后数据库操作失败。应该如何理解数据库事务的能力？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "事务会自动撤销远端 HTTP 请求"
+      },
+      {
+        "id": "b",
+        "text": "把网络超时设得很大就消除一致性问题"
+      },
+      {
+        "id": "c",
+        "text": "数据库回滚不会自动撤销外部请求，应设计幂等、补偿或调用顺序"
+      },
+      {
+        "id": "d",
+        "text": "只要模型返回成功，数据库就必须提交"
+      }
+    ],
+    "answer": [
+      "c"
+    ],
+    "explanation": "数据库事务不会自动撤销已经发送到外部模型、邮件或第三方接口的请求。\n外部副作用应独立设计，不能指望本地事务自动撤回。 判断结果应以题干前提和实际执行机制为依据，不能从名称或表面成功信号推断。",
+    "option_explanations": {
+      "a": "远端接口不自动参与本地数据库的事务协议。",
+      "b": "较大的超时可能延长资源占用，并不提供一致性保证。",
+      "c": "外部副作用应独立设计，不能指望本地事务自动撤回。",
+      "d": "两边的成功信号不同，必须明确实际失败与一致性语义。"
+    },
+    "evidence_quote": "数据库事务不会自动撤销已经发送到外部模型、邮件或第三方接口的请求。",
+    "keywords": [
+      "数据库事务",
+      "外部模型"
+    ],
+    "focus": "design",
+    "source_key": "demo:spring-transactions",
+    "source_section": "数据库事务与外部调用",
+    "source_sha256": "1a1d86c0d384689801ce0264477afe3ff665b91e1e6efa9aad9e61be948bd7ee"
+  },
+  {
+    "id": "demo-10",
+    "topic": "data",
+    "type": "single",
+    "title": "计数与过期的失败窗口",
+    "prompt": "请求先执行 INCR，随后执行 EXPIRE。设置过期前进程失败会产生什么风险？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "INCR 自带任意业务窗口的 TTL"
+      },
+      {
+        "id": "b",
+        "text": "计数已经成功但键可能没有预期过期时间"
+      },
+      {
+        "id": "c",
+        "text": "Redis 会回滚上一个独立命令"
+      },
+      {
+        "id": "d",
+        "text": "客户端重试必然自动修复所有状态"
+      }
+    ],
+    "answer": [
+      "b"
+    ],
+    "explanation": "Redis 的 INCR 是原子命令，但 INCR 和 EXPIRE 两次独立调用并不是一个整体原子操作。若计数已经递增而设置过期前发生失败，键可能长期保留。\n两个独立命令之间的失败可以留下没有过期的计数键。",
+    "option_explanations": {
+      "a": "计数命令的原子性不等于自动附加所需窗口过期语义。",
+      "b": "两个独立命令之间的失败可以留下没有过期的计数键。",
+      "c": "独立命令成功后，不会因下一次客户端失败自动撤销。",
+      "d": "重试的结果取决于业务逻辑，重复计数也可能发生。"
+    },
+    "evidence_quote": "Redis 的 INCR 是原子命令，但 INCR 和 EXPIRE 两次独立调用并不是一个整体原子操作。若计数已经递增而设置过期前发生失败，键可能长期保留。",
+    "keywords": [
+      "INCR",
+      "EXPIRE"
+    ],
+    "focus": "debug",
+    "source_key": "demo:redis-atomicity",
+    "source_section": "计数与过期的失败窗口",
+    "source_sha256": "c34ab7ca1aa8a7f716615aa171f4d09da684be39d97579ca6f06cdce5f936fd0"
+  },
+  {
+    "id": "demo-11",
+    "topic": "data",
+    "type": "single",
+    "title": "固定窗口的 TTL",
+    "prompt": "固定窗口限流中，每次请求都刷新计数键 TTL。最需要注意什么？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "TTL 与窗口语义没有关系"
+      },
+      {
+        "id": "b",
+        "text": "任何限流算法都应该刷新 TTL"
+      },
+      {
+        "id": "c",
+        "text": "每次刷新都保证窗口结束于原定时间"
+      },
+      {
+        "id": "d",
+        "text": "这可能把固定窗口变成持续延长的窗口"
+      }
+    ],
+    "answer": [
+      "d"
+    ],
+    "explanation": "每次请求都刷新计数键的 TTL，会把固定窗口悄悄改成持续延长的窗口。\n固定窗口通常通过窗口编号与首次过期设置表达。 判断结果应以题干前提和实际执行机制为依据，不能从名称或表面成功信号推断。",
+    "option_explanations": {
+      "a": "TTL 会影响计数键生命周期，需要与窗口定义一致。",
+      "b": "不同限流算法具有不同状态和更新规则，不能一概而论。",
+      "c": "不断延长过期会改变原定结束时刻，并不维持固定边界。",
+      "d": "固定窗口通常通过窗口编号与首次过期设置表达。"
+    },
+    "evidence_quote": "每次请求都刷新计数键的 TTL，会把固定窗口悄悄改成持续延长的窗口。",
+    "keywords": [
+      "固定窗口",
+      "TTL"
+    ],
+    "focus": "boundary",
+    "source_key": "demo:redis-atomicity",
+    "source_section": "固定窗口的 TTL",
+    "source_sha256": "c34ab7ca1aa8a7f716615aa171f4d09da684be39d97579ca6f06cdce5f936fd0"
+  },
+  {
+    "id": "demo-12",
+    "topic": "data",
+    "type": "multiple",
+    "title": "Lua 的隔离与错误",
+    "prompt": "使用 Redis Lua 时，哪些理解符合资料？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "脚本执行期间避免其它命令交错"
+      },
+      {
+        "id": "b",
+        "text": "脚本运行失败一定自动回滚之前所有写入"
+      },
+      {
+        "id": "c",
+        "text": "应先做必要校验，再执行写操作"
+      },
+      {
+        "id": "d",
+        "text": "可以不考虑脚本长度与服务器阻塞"
+      }
+    ],
+    "answer": [
+      "a",
+      "c"
+    ],
+    "explanation": "Redis Lua 脚本执行期间避免其它命令交错，但脚本发生运行错误不等于此前已执行的写入自动回滚。应先做必要的参数和类型验证，再进行写操作。\n脚本执行的隔离避免操作之间插入其它客户端命令。 提前验证可以降低已写部分状态后再发生错误的风险。",
+    "option_explanations": {
+      "a": "脚本执行的隔离避免操作之间插入其它客户端命令。",
+      "b": "运行错误不会自动提供数据库式的写入回滚能力。",
+      "c": "提前验证可以降低已写部分状态后再发生错误的风险。",
+      "d": "长脚本会影响服务器响应，需要控制工作量与耗时。"
+    },
+    "evidence_quote": "Redis Lua 脚本执行期间避免其它命令交错，但脚本发生运行错误不等于此前已执行的写入自动回滚。应先做必要的参数和类型验证，再进行写操作。",
+    "keywords": [
+      "Lua",
+      "原子"
+    ],
+    "focus": "mechanism",
+    "source_key": "demo:redis-atomicity",
+    "source_section": "Lua 的隔离与错误",
+    "source_sha256": "c34ab7ca1aa8a7f716615aa171f4d09da684be39d97579ca6f06cdce5f936fd0"
+  },
+  {
+    "id": "demo-13",
+    "topic": "project",
+    "type": "single",
+    "title": "可信身份的来源",
+    "prompt": "模型请求读取订单，并在参数中传入其它用户的 userId。后端应当怎样获取当前用户身份？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "从可信服务器上下文取得，并检查订单归属"
+      },
+      {
+        "id": "b",
+        "text": "相信模型参数，因为模型已经看到 schema"
+      },
+      {
+        "id": "c",
+        "text": "只检查 userId 是整数即可"
+      },
+      {
+        "id": "d",
+        "text": "只要请求来自登录用户就允许读取任意订单"
+      }
+    ],
+    "answer": [
+      "a"
+    ],
+    "explanation": "当前用户身份应来自可信服务器上下文，不由模型参数中的 userId 决定。即使用户已经登录、参数也合法，读取订单仍应检查订单是否属于这个用户。\n身份与订单归属属于服务器的可信认证和对象级授权。",
+    "option_explanations": {
+      "a": "身份与订单归属属于服务器的可信认证和对象级授权。",
+      "b": "schema 描述协议，不让模型参数成为可信身份。",
+      "c": "类型正确只证明输入形状，不证明身份与资源归属。",
+      "d": "登录与访问某个对象的权限不同，仍需授权判断。"
+    },
+    "evidence_quote": "当前用户身份应来自可信服务器上下文，不由模型参数中的 userId 决定。即使用户已经登录、参数也合法，读取订单仍应检查订单是否属于这个用户。",
+    "keywords": [
+      "userId",
+      "对象级权限"
+    ],
+    "focus": "scenario",
+    "source_key": "demo:agent-tool-boundaries",
+    "source_section": "可信身份的来源",
+    "source_sha256": "69fbf688a910edfdbfca9bc9157e28ba0b6af0431590499ca0ccfb098fbff37a"
+  },
+  {
+    "id": "demo-14",
+    "topic": "project",
+    "type": "multiple",
+    "title": "工具参数与层次",
+    "prompt": "模型已经使用工具 schema 生成参数，服务器仍需要哪些处理？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "只要 schema 存在就跳过所有验证"
+      },
+      {
+        "id": "b",
+        "text": "先验证工具白名单与原始参数，再安全转换"
+      },
+      {
+        "id": "c",
+        "text": "检查整数性、范围和转换精度"
+      },
+      {
+        "id": "d",
+        "text": "先 intValue 截断小数再视为合法整数"
+      }
+    ],
+    "answer": [
+      "b",
+      "c"
+    ],
+    "explanation": "工具名与参数来自模型，应先经过工具白名单和原始参数验证，再进行安全类型转换和业务调用。工具 schema 帮助模型理解协议，不能取代服务器校验。\n原始参数先校验可以避免非法输入进入业务调用。 数字类型不能直接等同目标整数，范围和精度都重要。",
+    "option_explanations": {
+      "a": "模型输出仍是不可信输入，描述格式不等于强制执行规则。",
+      "b": "原始参数先校验可以避免非法输入进入业务调用。",
+      "c": "数字类型不能直接等同目标整数，范围和精度都重要。",
+      "d": "静默截断会把非法输入转换成另一有效值，掩盖错误。"
+    },
+    "evidence_quote": "工具名与参数来自模型，应先经过工具白名单和原始参数验证，再进行安全类型转换和业务调用。工具 schema 帮助模型理解协议，不能取代服务器校验。",
+    "keywords": [
+      "schema",
+      "校验"
+    ],
+    "focus": "mechanism",
+    "source_key": "demo:agent-tool-boundaries",
+    "source_section": "工具参数与层次",
+    "source_sha256": "69fbf688a910edfdbfca9bc9157e28ba0b6af0431590499ca0ccfb098fbff37a"
+  },
+  {
+    "id": "demo-15",
+    "topic": "project",
+    "type": "single",
+    "title": "引用的真实来源",
+    "prompt": "模型自行返回了很正式的文档标题和链接，但这些不在本次检索片段中。应该如何处理？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "只要标题看起来正式就作为证据"
+      },
+      {
+        "id": "b",
+        "text": "模型语言流畅可以证明链接真实"
+      },
+      {
+        "id": "c",
+        "text": "不能当成可信引用，资料不足时明确缺口或拒答"
+      },
+      {
+        "id": "d",
+        "text": "无需元数据，只需要回答里出现引用编号"
+      }
+    ],
+    "answer": [
+      "c"
+    ],
+    "explanation": "引用只能绑定本次实际检索到的片段，由服务器保存可信元数据。模型输出一个看似正式的文档标题或链接，不会因此变成可信证据。\n可信引用绑定实际检索与服务器元数据，不足时不伪造。",
+    "option_explanations": {
+      "a": "外观不能证明该资料属于本次实际检索到的证据。",
+      "b": "流畅表达与来源真实性之间没有这样的保证。",
+      "c": "可信引用绑定实际检索与服务器元数据，不足时不伪造。",
+      "d": "编号本身不建立证据链，也不能验证所引用内容。"
+    },
+    "evidence_quote": "引用只能绑定本次实际检索到的片段，由服务器保存可信元数据。模型输出一个看似正式的文档标题或链接，不会因此变成可信证据。",
+    "keywords": [
+      "引用",
+      "片段"
+    ],
+    "focus": "boundary",
+    "source_key": "demo:agent-tool-boundaries",
+    "source_section": "引用的真实来源",
+    "source_sha256": "69fbf688a910edfdbfca9bc9157e28ba0b6af0431590499ca0ccfb098fbff37a"
+  },
+  {
+    "id": "demo-16",
+    "topic": "algorithm",
+    "type": "single",
+    "title": "二分区间的前进",
+    "prompt": "采用闭区间 [left, right]，当 array[mid] 小于目标时，怎样更新才能排除已检查位置并前进？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "left = mid + 1"
+      },
+      {
+        "id": "b",
+        "text": "left = mid"
+      },
+      {
+        "id": "c",
+        "text": "right = mid + 1"
+      },
+      {
+        "id": "d",
+        "text": "固定 mid 不再改变"
+      }
+    ],
+    "answer": [
+      "a"
+    ],
+    "explanation": "中间值小于目标时，下一轮设 left = mid + 1；中间值大于目标时，设 right = mid - 1。检查过的 mid 可以排除，区间应严格缩小。\n已确认中点过小，可以排除它并从后一位置继续。",
+    "option_explanations": {
+      "a": "已确认中点过小，可以排除它并从后一位置继续。",
+      "b": "剩下两个元素时，这种更新可能没有缩小区间。",
+      "c": "这个方向不能正确保留所有可能的大于中点的答案。",
+      "d": "固定中点无法维护区间缩小和终止条件。"
+    },
+    "evidence_quote": "中间值小于目标时，下一轮设 left = mid + 1；中间值大于目标时，设 right = mid - 1。检查过的 mid 可以排除，区间应严格缩小。",
+    "keywords": [
+      "left",
+      "mid"
+    ],
+    "focus": "mechanism",
+    "source_key": "demo:search-invariants",
+    "source_section": "二分区间的前进",
+    "source_sha256": "c5855aab13615f1fa8668204949adcf1514e3db5370b9473dba0d864b7949e64"
+  },
+  {
+    "id": "demo-17",
+    "topic": "algorithm",
+    "type": "single",
+    "title": "闭区间的空数组",
+    "prompt": "空数组初始化 left=0、right=-1，循环条件 left <= right。关于首次读取哪个判断正确？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "必须先读取 array[0] 才能发现空数组"
+      },
+      {
+        "id": "b",
+        "text": "循环条件不成立，不进入循环读取元素"
+      },
+      {
+        "id": "c",
+        "text": "必须把 right 改为零才能返回"
+      },
+      {
+        "id": "d",
+        "text": "left 与 right 必须始终非负"
+      }
+    ],
+    "answer": [
+      "b"
+    ],
+    "explanation": "空数组初始化 right 为 -1，闭区间循环条件立刻不成立，因此不读取元素。不要在循环之前不加判断地访问 array[0]。\n闭区间初始为空，因此可以直接结束而不访问数组。",
+    "option_explanations": {
+      "a": "空数组没有第一个元素，预先读取会破坏边界安全。",
+      "b": "闭区间初始为空，因此可以直接结束而不访问数组。",
+      "c": "把不存在的位置加入区间会导致无效元素访问。",
+      "d": "负的右边界可以表达初始空区间，是合理约定。"
+    },
+    "evidence_quote": "空数组初始化 right 为 -1，闭区间循环条件立刻不成立，因此不读取元素。不要在循环之前不加判断地访问 array[0]。",
+    "keywords": [
+      "空数组",
+      "right"
+    ],
+    "focus": "boundary",
+    "source_key": "demo:search-invariants",
+    "source_section": "闭区间的空数组",
+    "source_sha256": "c5855aab13615f1fa8668204949adcf1514e3db5370b9473dba0d864b7949e64"
+  },
+  {
+    "id": "demo-18",
+    "topic": "algorithm",
+    "type": "single",
+    "title": "重复元素与查找目标",
+    "prompt": "数组有多个相同目标值，普通二分查找找到了其中一个。关于结果能证明什么？",
+    "difficulty": "应用",
+    "options": [
+      {
+        "id": "a",
+        "text": "一定是最左的目标位置"
+      },
+      {
+        "id": "b",
+        "text": "一定是最右的目标位置"
+      },
+      {
+        "id": "c",
+        "text": "任何区间更新方式都等价"
+      },
+      {
+        "id": "d",
+        "text": "证明找到了相等元素，不自动保证最左位置"
+      }
+    ],
+    "answer": [
+      "d"
+    ],
+    "explanation": "普通查找只需返回任意一个相等元素的位置；查找第一个大于等于目标的位置则需要不同的不变量和退出后解释。\n查找第一个大于等于目标的位置需要不同不变量。",
+    "option_explanations": {
+      "a": "普通查找任务允许任意相等元素，最左位置需要额外约定。",
+      "b": "最右位置同样需要专门维护的边界与目标条件。",
+      "c": "区间类型与更新规则必须配套，不能随意互换。",
+      "d": "查找第一个大于等于目标的位置需要不同不变量。"
+    },
+    "evidence_quote": "普通查找只需返回任意一个相等元素的位置；查找第一个大于等于目标的位置则需要不同的不变量和退出后解释。",
+    "keywords": [
+      "重复元素",
+      "不变量"
+    ],
+    "focus": "scenario",
+    "source_key": "demo:search-invariants",
+    "source_section": "重复元素与查找目标",
+    "source_sha256": "c5855aab13615f1fa8668204949adcf1514e3db5370b9473dba0d864b7949e64"
+  }
+]
