@@ -71,6 +71,11 @@ class Library:
             CREATE TABLE IF NOT EXISTS generation_drafts (
               id TEXT PRIMARY KEY, material_id TEXT NOT NULL, source_sha256 TEXT NOT NULL,
               payload TEXT NOT NULL, created_at INTEGER NOT NULL, committed_at INTEGER);
+            CREATE TABLE IF NOT EXISTS study_tasks (
+              id TEXT PRIMARY KEY, date TEXT NOT NULL, title TEXT NOT NULL, topic TEXT NOT NULL,
+              material_id TEXT NOT NULL, notes TEXT NOT NULL, estimated_minutes INTEGER NOT NULL,
+              actual_minutes INTEGER NOT NULL DEFAULT 0, completed INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, completed_at INTEGER);
             """)
 
     @contextmanager
@@ -179,8 +184,8 @@ class Library:
     def backup(self):
         """Consistent rows plus hash-addressed files; excludes env and API credentials."""
         with self.lock, self.connect() as conn:
-            data = {"schema": "codesprint-backup-v1", "exported_at": int(time.time()), "tables": {}}
-            for name in ("materials", "questions", "generation_drafts", "quiz_sessions", "quiz_review"):
+            data = {"schema": "codesprint-backup-v2", "exported_at": int(time.time()), "tables": {}}
+            for name in ("materials", "questions", "generation_drafts", "study_tasks", "quiz_sessions", "quiz_review"):
                 data["tables"][name] = [dict(r) for r in conn.execute("SELECT * FROM " + name)]
             stream = io.BytesIO()
             with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -196,6 +201,7 @@ class Library:
         """Validate in an isolated database before any live write; never extract paths."""
         from .backup_validation import validate_stored_question, validate_session, validate_review, validate_draft
         from .quiz import QuizStore
+        from .planning import validate_task_row, MAX_TASKS
         if not content or len(content) > 128 * 1024 * 1024:
             raise ValueError("请选择 128 MB 以内的学习站 ZIP 备份。")
         try:
@@ -210,12 +216,17 @@ class Library:
                 if archive.getinfo("backup.json").file_size > 64 * 1024 * 1024:
                     raise ValueError("备份元数据过大。")
                 manifest = json.loads(archive.read("backup.json"))
-                if not isinstance(manifest, dict) or manifest.get("schema") != "codesprint-backup-v1":
+                if not isinstance(manifest, dict) or manifest.get("schema") not in ("codesprint-backup-v1", "codesprint-backup-v2"):
                     raise ValueError("备份版本不受支持。")
+                legacy = manifest["schema"] == "codesprint-backup-v1"
                 tables = manifest.get("tables")
                 required = {"materials", "questions", "generation_drafts", "quiz_sessions", "quiz_review"}
+                if not legacy:
+                    required.add("study_tasks")
                 if not isinstance(tables, dict) or set(tables) != required or any(not isinstance(rows, list) or len(rows) > 100000 for rows in tables.values()):
                     raise ValueError("备份数据表结构无效。")
+                if not legacy and len(tables["study_tasks"]) > MAX_TASKS:
+                    raise ValueError("备份任务数量超过限制。")
                 with tempfile.TemporaryDirectory(prefix="codesprint-restore-") as temp:
                     staged = Library(temp)
                     QuizStore(staged)
@@ -223,9 +234,13 @@ class Library:
                         for name, rows in tables.items():
                             columns = [r["name"] for r in conn.execute("PRAGMA table_info(" + name + ")")]
                             for row in rows:
-                                if not isinstance(row, dict) or set(row) != set(columns):
+                                source_columns = [c for c in columns if c != "task_id"] if legacy and name == "quiz_sessions" else columns
+                                if not isinstance(row, dict) or set(row) != set(source_columns):
                                     raise ValueError("备份记录字段不完整。")
-                                conn.execute("INSERT INTO " + name + " (" + ",".join(columns) + ") VALUES (" + ",".join("?" for _ in columns) + ")", [row[k] for k in columns])
+                                conn.execute("INSERT INTO " + name + " (" + ",".join(source_columns) + ") VALUES (" + ",".join("?" for _ in source_columns) + ")", [row[k] for k in source_columns])
+                    with staged.connect() as conn:
+                        for row in tables.get("study_tasks", []):
+                            validate_task_row(row, conn)
                     for row in tables["materials"]:
                         if not re.fullmatch(r"[a-f0-9]{32}", row["id"]) or not re.fullmatch(r"[a-f0-9]{64}", row["sha256"]):
                             raise ValueError("备份资料标识无效。")
@@ -248,7 +263,7 @@ class Library:
                             raise ValueError("备份题库主键不一致。")
                         validate_stored_question(q, staged)
                     for row in tables["quiz_sessions"]:
-                        validate_session(row, staged)
+                        validate_session(dict(row, task_id="") if legacy else row, staged)
                     for row in tables["quiz_review"]:
                         validate_review(row)
                     for row in tables["generation_drafts"]:
@@ -264,6 +279,6 @@ class Library:
                         temporary_db = self.directory / "restore.sqlite3.tmp"
                         temporary_db.write_bytes(staged.database.read_bytes())
                         os.replace(temporary_db, self.database)
-                    return {"restored": True, "materials": len(tables["materials"]), "questions": len(bank), "sessions": len(tables["quiz_sessions"])}
+                    return {"restored": True, "materials": len(tables["materials"]), "questions": len(bank), "sessions": len(tables["quiz_sessions"]), "tasks": len(tables.get("study_tasks", []))}
         except (OSError, zipfile.BadZipFile, sqlite3.Error, KeyError, TypeError, AttributeError, json.JSONDecodeError):
             raise ValueError("备份无效或损坏；当前资料和记录未被替换。") from None

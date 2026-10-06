@@ -2,14 +2,14 @@
 (() => {
   'use strict';
   if(window.__CS_CONTENT_FRAME__)return;
-  let controller, token='', session=null, topic='', material='', catalog=null, activeIndex=0, busy=false;
+  let controller, token='', session=null, topic='', material='', taskId='', task=null, catalog=null, activeIndex=0, busy=false;
   const $=selector=>document.querySelector(selector);
   const labels={java:'Java 基础',concurrency:'并发与 JVM',spring:'Spring 与 HTTP',data:'数据库 / Redis / MQ',project:'Agent 项目',algorithm:'算法思路'};
   const fmtDate=value=>new Date(value*1000).toLocaleString('zh-CN',{month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit'});
   const element=(tag,text,className)=>{const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(className)node.className=className;return node;};
   function message(text=''){if($('#quizStatus'))$('#quizStatus').textContent=text;}
   function safeSourceURL(value){
-    try{const url=new URL(value||'index.html',location.href);if(url.origin===location.origin){if(url.pathname==='/materials/'||url.pathname==='/materials')url.pathname='/index.html';return /^\/(index\.html)?$/.test(url.pathname)?url.href:new URL('index.html',location.href).href;}if(url.protocol==='https:')return url.href;}catch(_){}
+    try{const url=new URL(value||'index.html',location.href);if(url.origin===location.origin){if(url.pathname==='/materials/'||url.pathname==='/materials')url.pathname='/index.html';if(!/^\/(index\.html)?$/.test(url.pathname))return new URL('index.html',location.href).href;if(session?.task_id)url.searchParams.set('task',session.task_id);return url.href;}if(url.protocol==='https:')return url.href;}catch(_){}
     return new URL('index.html',location.href).href;
   }
   async function api(path,body){
@@ -30,6 +30,7 @@
     $('#quizResultMode').textContent=session.mode==='exam'?'EXAM / 测验首答':'PRACTICE / 练习首答';
     $('#quizResultTitle').textContent=r.passed?'本轮通过':'继续复习';$('#quizScore').textContent=r.percent+'%';
     $('#quizResultDetail').textContent=`首答正确 ${r.correct} / ${r.total} 题；通过线 80%。${r.guessed?'其中 '+r.guessed+' 题标记为猜测，需要继续复习。':''}这份结果不代替闭卷口述或手写验收。`;
+    $('#quizTaskReturn').hidden=!session.task_id;if(session.task_id)$('#quizTaskReturn').href='plan.html?task='+encodeURIComponent(session.task_id);
     $('#quizResultReview').replaceChildren(...session.questions.map(reviewItem));$('#quizResultTitle').scrollIntoView({block:'nearest'});
   }
   function renderQuestion(){
@@ -50,7 +51,7 @@
     $('#quizQuestionTitle').focus({preventScroll:true});
     if(!answered&&matchMedia('(max-width: 720px)').matches)$('#quizRun').scrollIntoView({block:'start',behavior:'auto'});
   }
-  function useSession(data){session=data;message();if(session.finished){result();return;}activeIndex=session.questions.findIndex(q=>!q.response);renderQuestion();}
+  function useSession(data){session=data;message();window.ShizhiHelp?.showTask(session.task_id||'');if(session.finished){result();return;}activeIndex=session.questions.findIndex(q=>!q.response);renderQuestion();}
   async function refresh(){
     catalog=await api('/api/quiz/catalog'+(material?'?material='+encodeURIComponent(material):''));if(!controller||controller.signal.aborted)return;
     $('#quizInventory').textContent=catalog.total+' 道可用题目'+(catalog.unavailable?' · '+catalog.unavailable+' 道来源待核对':'');
@@ -58,7 +59,7 @@
     $('#quizReviewStats').textContent=`已练 ${catalog.stats.practiced} / ${catalog.total} 题 · 薄弱 ${catalog.stats.wrong} 题 · 到期 ${catalog.stats.due} 题`;
     $('#quizMaterialScope').hidden=!material;$('#quizMaterialScope').replaceChildren();if(material){$('#quizMaterialScope').append(element('span','当前只练这份资料的题目。 '));const a=element('a','切换全部题库 ↗');a.href='/interview.html';$('#quizMaterialScope').append(a);}
     $('#quizTopics').replaceChildren();const all=[{id:'',label:'全部主题',count:catalog.total},...catalog.topics];
-    all.forEach(t=>{const button=element('button');button.type='button';button.dataset.topic=t.id;button.setAttribute('aria-current',String(topic===t.id));button.append(element('span',t.label),element('small',String(t.count)));button.disabled=busy;listening(button,'click',()=>{topic=t.id;$('#quizTopics').querySelectorAll('button').forEach(b=>b.setAttribute('aria-current',String(b.dataset.topic===topic)));message();});$('#quizTopics').append(button);});
+    all.forEach(t=>{const button=element('button');button.type='button';button.dataset.topic=t.id;button.setAttribute('aria-current',String(topic===t.id));button.append(element('span',t.label),element('small',String(t.count)));button.disabled=busy||Boolean(task?.topic&&task.topic!==t.id);if(task?.topic&&task.topic!==t.id)button.title='当前任务限定了练习领域。返回计划可以另建任务。';listening(button,'click',()=>{topic=t.id;$('#quizTopics').querySelectorAll('button').forEach(b=>b.setAttribute('aria-current',String(b.dataset.topic===topic)));message();});$('#quizTopics').append(button);});
     $('#quizResume').hidden=!catalog.active;
     $('#quizSources').replaceChildren();for(const source of catalog.sources||[]){const box=element('div',undefined,'quiz-source-row'),a=element('a',source.name+' ↗');a.href=safeSourceURL(source.url);a.target='_blank';a.rel='noopener noreferrer';box.append(a,element('span',source.checked_at?' 核实 '+source.checked_at:''));const articles=element('div');for(const article of source.articles||[]){const link=element('a',article.title+' ↗');link.href=safeSourceURL(article.url);link.target='_blank';link.rel='noopener noreferrer';articles.append(link);}box.append(articles);$('#quizSources').append(box);}
     $('#quizHistory').replaceChildren();if(!catalog.recent.length)$('#quizHistory').append(element('p','暂无作答记录。开始一轮练习，首答与复习安排会自动保存。','quiz-method'));
@@ -73,17 +74,17 @@
   }
   function destroy(){controller?.abort();controller=null;session=null;busy=false;}
   async function mount(){
-    destroy();if(!$('#quizApp'))return;controller=new AbortController();const scope=controller;token='';topic='';material=new URL(window.CodeSprintRouter?.currentURL||location.href).searchParams.get('material')||'';
+    destroy();if(!$('#quizApp'))return;controller=new AbortController();const scope=controller;token='';const params=new URL(window.CodeSprintRouter?.currentURL||location.href).searchParams;topic=labels[params.get('topic')]?params.get('topic'):'';material=params.get('material')||'';taskId=params.get('task')||'';task=null;
     if(location.protocol==='file:'){message('请先启动本项目的本地服务，再在浏览器中进入记忆练习。');$('#quizStart').disabled=true;return;}
-    listening($('#quizStartForm'),'submit',async event=>{event.preventDefault();if(busy)return;busy=true;$('#quizStart').disabled=true;try{useSession(await api('/api/quiz/sessions',{mode:$('#quizMode').value,scope:$('#quizScope').value,topic,count:Number($('#quizCount').value),material}));}catch(e){if(e.name!=='AbortError')message(e.message);}finally{if(scope===controller){busy=false;if($('#quizStart'))$('#quizStart').disabled=false;}}});
+    listening($('#quizStartForm'),'submit',async event=>{event.preventDefault();if(busy)return;busy=true;$('#quizStart').disabled=true;try{const request={mode:$('#quizMode').value,scope:$('#quizScope').value,count:Number($('#quizCount').value)};if(taskId){request.task_id=taskId;if(!task?.topic&&topic)request.topic=topic;if(!task?.material_id&&material)request.material=material;}else{request.topic=topic;request.material=material;}useSession(await api('/api/quiz/sessions',request));}catch(e){if(e.name!=='AbortError')message(e.message);}finally{if(scope===controller){busy=false;if($('#quizStart'))$('#quizStart').disabled=false;}}});
     listening($('#quizMode'),'change',()=>{if($('#quizMode').value==='exam'){$('#quizScope').value='all';$('#quizCount').value='20';}});
     listening($('#quizAnswerForm'),'submit',event=>{event.preventDefault();submit();});listening($('#quizSkip'),'click',()=>submit(true));
     listening($('#quizNext'),'click',()=>{if(session.finished)result();else{activeIndex++;renderQuestion();}});
     listening($('#quizEnd'),'click',async()=>{if(busy)return;busy=true;$('#quizEnd').disabled=true;try{useSession(await api('/api/quiz/sessions/'+session.id+'/finish',{}));}catch(e){if(e.name!=='AbortError')message(e.message);}finally{if(scope===controller){busy=false;if($('#quizEnd'))$('#quizEnd').disabled=false;}}});
-    listening($('#quizAgain'),'click',async()=>{switchPanel('quizSetup');message();try{await refresh();}catch(e){if(e.name!=='AbortError')message(e.message);}});
+    listening($('#quizAgain'),'click',async()=>{switchPanel('quizSetup');message();window.ShizhiHelp?.showTask(taskId);try{await refresh();}catch(e){if(e.name!=='AbortError')message(e.message);}});
     listening($('#quizResume'),'click',async()=>{try{useSession(await api('/api/quiz/sessions/'+catalog.active));}catch(e){if(e.name!=='AbortError')message(e.message);}});
     listening(document,'keydown',event=>{if(event.repeat||event.ctrlKey||event.metaKey||event.altKey||!session||$('#quizRun').hidden||event.target.closest('a,button,select'))return;if(/^[1-4]$/.test(event.key)&&!session.questions[activeIndex].response){const inputs=[...$('#quizOptions').querySelectorAll('input')],input=inputs[Number(event.key)-1];if(input&&!input.disabled){event.preventDefault();input.checked=input.type==='radio'||!input.checked;input.dispatchEvent(new Event('change',{bubbles:true}));}}else if(event.key==='Enter'){event.preventDefault();if(!$('#quizNext').hidden)$('#quizNext').click();else submit();}});
-    try{token=(await api('/api/bootstrap')).token;await refresh();}catch(e){if(e.name!=='AbortError')message(e.message);}
+    try{token=(await api('/api/bootstrap')).token;if(taskId){task=await window.ShizhiHelp.getTask(taskId);topic=task.topic||topic;material=task.material_id||material;}await refresh();}catch(e){if(e.name!=='AbortError')message(e.message);$('#quizStart').disabled=true;}
   }
   window.CodeSprintQuiz={mount,destroy};document.addEventListener('codesprint:navigation-start',destroy);
   if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{if($('#quizApp'))mount();},{once:true});else if(!window.__CS_ROUTER_MOUNTING__&&$('#quizApp'))mount();

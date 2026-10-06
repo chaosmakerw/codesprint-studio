@@ -18,6 +18,7 @@ import webbrowser
 
 from .generation import Generation, ProviderError, validate_questions
 from .quiz import QuizStore, TOPICS
+from .planning import PlanningStore
 from .storage import CATEGORIES, Library, MAX_UPLOAD, dumps, file_text
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -54,6 +55,7 @@ class Application:
         self.root = Path(root).resolve()
         self.library = Library(data_dir)
         self.quiz = QuizStore(self.library)
+        self.planning = PlanningStore(self.library)
         self.generation = Generation(self.library, provider, self.root / "prompts/question-author.md")
         self.token = secrets.token_urlsafe(32)
 
@@ -217,6 +219,12 @@ class Handler(BaseHTTPRequestHandler):
                     self.respond(app.library.get(match[1], query.get("trashed", ["false"])[0] == "true"))
             elif path == "/api/quiz/catalog":
                 self.respond(app.quiz.catalog(query.get("material", [""])[0]))
+            elif path == "/api/planning/tasks":
+                self.respond(app.planning.listing(query.get("date", [""])[0], query.get("status", ["all"])[0], query.get("search", [""])[0]))
+            elif path == "/api/planning/summary":
+                self.respond(app.planning.summary(query.get("date", [""])[0]))
+            elif match := re.fullmatch(r"/api/planning/tasks/([a-z0-9-]{1,80})", path):
+                self.respond(app.planning.get(match[1]))
             elif match := re.fullmatch(r"/api/quiz/sessions/([a-f0-9]{32})", path):
                 self.respond(app.quiz.get(match[1]))
             elif match := re.fullmatch(r"/api/generation/drafts/([a-f0-9]{32})", path):
@@ -229,6 +237,8 @@ class Handler(BaseHTTPRequestHandler):
                 self.static(path)
         elif self.command == "PATCH" and (match := re.fullmatch(r"/api/materials/([a-f0-9]{32})", path)):
             self.respond(app.library.patch(match[1], self.json_body()))
+        elif self.command == "PATCH" and (match := re.fullmatch(r"/api/planning/tasks/([a-z0-9-]{1,80})", path)):
+            self.respond(app.planning.patch(match[1], self.json_body()))
         elif self.command == "POST":
             if path == "/api/upload":
                 self.respond(app.library.upload(query.get("filename", [""])[0], self.body(), query.get("category", ["其他资料"])[0], query.get("tags", [""])[0]), 201)
@@ -240,6 +250,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.respond(app.library.restore(self.body(128 * 1024 * 1024)))
             elif path == "/api/demo/import":
                 self.respond(app.import_demo(self.json_body()))
+            elif path == "/api/planning/tasks":
+                self.respond(app.planning.create(self.json_body()), 201)
+            elif path == "/api/planning/import":
+                self.respond(app.planning.import_tasks(self.json_body()))
             elif path == "/api/quiz/sessions":
                 self.respond(app.quiz.start(self.json_body()), 201)
             elif match := re.fullmatch(r"/api/quiz/sessions/([a-f0-9]{32})/(answer|finish)", path):
@@ -256,7 +270,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def static(self, path):
         if path == "/":
-            path = "/index.html"
+            path = "/plan.html"
         relative = Path(path.lstrip("/"))
         web = self.server.app.root / "web"
         target = (web / relative).resolve()

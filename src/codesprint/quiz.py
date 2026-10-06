@@ -36,7 +36,9 @@ class QuizStore:
             conn.execute("""CREATE TABLE IF NOT EXISTS quiz_sessions (
               id TEXT PRIMARY KEY, mode TEXT NOT NULL, topic TEXT NOT NULL, scope TEXT NOT NULL,
               questions TEXT NOT NULL, answers TEXT NOT NULL, created_at INTEGER NOT NULL,
-              finished_at INTEGER)""")
+              finished_at INTEGER, task_id TEXT NOT NULL DEFAULT '')""")
+            if "task_id" not in {r["name"] for r in conn.execute("PRAGMA table_info(quiz_sessions)")}:
+                conn.execute("ALTER TABLE quiz_sessions ADD COLUMN task_id TEXT NOT NULL DEFAULT ''")
             conn.execute("""CREATE TABLE IF NOT EXISTS quiz_review (
               question_id TEXT PRIMARY KEY, version TEXT NOT NULL, attempts INTEGER NOT NULL,
               wrong_count INTEGER NOT NULL, needs_review INTEGER NOT NULL, correct_streak INTEGER NOT NULL,
@@ -85,6 +87,9 @@ class QuizStore:
             raise ValueError("请求格式无效。")
         mode, topic, scope = payload.get("mode", "practice"), payload.get("topic", ""), payload.get("scope", "all")
         count, material = payload.get("count", 10), payload.get("material", "")
+        task_identity = payload.get("task_id", "")
+        if not isinstance(task_identity, str) or len(task_identity) > 80:
+            raise ValueError("关联学习任务编号无效。")
         if mode not in ("practice", "exam") or topic not in ("", *TOPICS) or scope not in ("mixed", "wrong", "due", "all"):
             raise ValueError("练习范围无效。")
         if type(count) is not int or not 1 <= count <= 30 or not isinstance(material, str):
@@ -92,6 +97,21 @@ class QuizStore:
         now = int(self.clock())
         with self.library.lock, self.library.connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if task_identity:
+                task = conn.execute("SELECT * FROM study_tasks WHERE id=?", (task_identity,)).fetchone()
+                if not task:
+                    raise KeyError(task_identity)
+                if task["topic"]:
+                    if topic and topic != task["topic"]:
+                        raise ValueError("练习领域与关联学习任务不一致。")
+                    topic = task["topic"]
+                if task["material_id"]:
+                    if material and material != task["material_id"]:
+                        raise ValueError("练习资料与关联学习任务不一致。")
+                    material = task["material_id"]
+                    source = conn.execute("SELECT trashed,missing FROM materials WHERE id=?", (material,)).fetchone()
+                    if not source or source["trashed"] or source["missing"]:
+                        raise ValueError("任务关联资料暂不可用，请先恢复资料。")
             candidates = [q for q in self.available(conn) if (not topic or q["topic"] == topic)
                           and (not material or q["source"]["id"] == material)]
             states = {r["question_id"]: dict(r) for r in conn.execute("SELECT * FROM quiz_review")}
@@ -118,8 +138,8 @@ class QuizStore:
             for q in chosen:
                 self.rng.shuffle(q["options"])
             identity = uuid.uuid4().hex
-            conn.execute("INSERT INTO quiz_sessions VALUES (?,?,?,?,?,?,?,NULL)",
-                         (identity, mode, topic, scope, json.dumps(chosen, ensure_ascii=False), "{}", now))
+            conn.execute("INSERT INTO quiz_sessions (id,mode,topic,scope,questions,answers,created_at,finished_at,task_id) VALUES (?,?,?,?,?,?,?,NULL,?)",
+                         (identity, mode, topic, scope, json.dumps(chosen, ensure_ascii=False), "{}", now, task_identity))
             return self.public(dict(conn.execute("SELECT * FROM quiz_sessions WHERE id=?", (identity,)).fetchone()))
 
     @staticmethod
@@ -140,6 +160,7 @@ class QuizStore:
             public_questions.append(item)
         total, correct = len(questions), sum(a["correct"] for a in answers.values())
         return {"id": row["id"], "mode": row["mode"], "topic": row["topic"], "scope": row["scope"],
+                "task_id": row.get("task_id", ""),
                 "created_at": row["created_at"], "finished": finished, "answered": len(answers), "total": total,
                 "questions": public_questions,
                 "result": {"correct": correct, "total": total, "percent": round(100 * correct / total, 1),

@@ -49,6 +49,24 @@ def validate_session(row, library):
         raise ValueError("备份题目和首答结构无效。")
     for q in questions:
         validate_stored_question(q, library)
+        if "source" not in q:
+            raise ValueError("备份练习快照缺少实际来源引用。")
+    from .planning import task_id
+    linked_task = row.get("task_id")
+    if not isinstance(linked_task, str):
+        raise ValueError("备份练习任务关联无效。")
+    if linked_task:
+        task_id(linked_task)
+        with library.connect() as conn:
+            task = conn.execute("SELECT * FROM study_tasks WHERE id=?", (linked_task,)).fetchone()
+        if not task:
+            raise ValueError("备份练习关联到不存在的学习任务。")
+        if row["created_at"] < task["created_at"]:
+            raise ValueError("备份练习时间早于其关联任务。")
+        if task["topic"] and (row["topic"] != task["topic"] or any(q["topic"] != task["topic"] for q in questions)):
+            raise ValueError("备份练习领域与学习任务不一致。")
+        if task["material_id"] and any(q["source"]["id"] != task["material_id"] for q in questions):
+            raise ValueError("备份练习来源与学习任务不一致。")
     ids = [q["id"] for q in questions]
     if len(set(ids)) != len(ids) or list(answers) != ids[:len(answers)] or len(answers) > len(ids):
         raise ValueError("备份首答顺序或题号无效。")
