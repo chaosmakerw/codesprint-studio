@@ -1,6 +1,6 @@
 # Third-Party Notices / 第三方声明
 
-CodeSprint Studio 的原创代码和原创文档由 chaosmakerw 及后续贡献者按根目录 `LICENSE` 中的 Apache License 2.0 授权。
+拾知（CodeSprint Studio）的原创代码和原创文档由 chaosmakerw 及后续贡献者按根目录 `LICENSE` 中的 Apache License 2.0 授权。
 
 ## 本版分发范围
 
