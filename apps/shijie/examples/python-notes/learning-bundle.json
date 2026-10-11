@@ -1,0 +1,3625 @@
+{
+  "schema_version": 2,
+  "title": "原创 Python 笔记任务队列：从输入到隔离",
+  "project": {
+    "name": "Python 笔记任务队列"
+  },
+  "files": [
+    {
+      "path": "project/job_queue.py",
+      "text": "\"\"\"An original, single-process queue for pending note-review jobs.\n\nOnly pending keys are deduplicated. Taking a job releases its key. This small\nteaching example has no worker threads, database, network or retry guarantee.\n\"\"\"\nfrom __future__ import annotations\n\n\nclass NoteQueue:\n    def __init__(self, capacity: int):\n        if type(capacity) is not int or capacity <= 0:\n            raise ValueError(\"capacity must be a positive integer\")\n        self._capacity = capacity\n        self._pending: dict[str, dict[str, str]] = {}\n\n    @staticmethod\n    def _key(raw: str) -> str:\n        if not isinstance(raw, str):\n            raise ValueError(\"key must be text\")\n        normalized = raw.strip().casefold()\n        if not normalized:\n            raise ValueError(\"key must not be blank\")\n        return normalized\n\n    def enqueue(self, raw_key: str, text: str) -> bool:\n        key = self._key(raw_key)\n        if not isinstance(text, str) or not text.strip():\n            raise ValueError(\"text must not be blank\")\n        if key in self._pending:\n            return False\n        if len(self._pending) >= self._capacity:\n            raise OverflowError(\"pending queue is full\")\n        self._pending[key] = {\"key\": key, \"text\": text.strip()}\n        return True\n\n    def take(self) -> dict[str, str] | None:\n        if not self._pending:\n            return None\n        oldest_key = next(iter(self._pending))\n        return dict(self._pending.pop(oldest_key))\n\n    def snapshot(self) -> list[dict[str, str]]:\n        return [dict(job) for job in self._pending.values()]\n"
+    },
+    {
+      "path": "project/test_job_queue.py",
+      "text": "\"\"\"Original unit tests using real NoteQueue objects and no external services.\"\"\"\nimport unittest\n\nfrom job_queue import NoteQueue\n\n\nclass NoteQueueTests(unittest.TestCase):\n    def test_capacity_rejects_boolean_zero_float_and_accepts_one(self):\n        for invalid in (True, False, 0, -1, 2.0, \"2\"):\n            with self.subTest(capacity=invalid), self.assertRaises(ValueError):\n                NoteQueue(invalid)\n        self.assertEqual(NoteQueue(1).snapshot(), [])\n\n    def test_normalized_duplicate_preserves_original_text(self):\n        queue = NoteQueue(2)\n        self.assertTrue(queue.enqueue(\" A \", \" First \"))\n        self.assertFalse(queue.enqueue(\"a\", \"Replacement\"))\n        self.assertEqual(queue.snapshot(), [{\"key\": \"a\", \"text\": \"First\"}])\n\n    def test_full_duplicate_is_rejected_before_capacity_check(self):\n        queue = NoteQueue(1)\n        queue.enqueue(\"a\", \"First\")\n        self.assertFalse(queue.enqueue(\" A \", \"Second\"))\n        with self.assertRaises(OverflowError):\n            queue.enqueue(\"b\", \"New\")\n        self.assertEqual(queue.snapshot(), [{\"key\": \"a\", \"text\": \"First\"}])\n\n    def test_invalid_values_do_not_mutate_and_precede_duplicate_check(self):\n        queue = NoteQueue(1)\n        queue.enqueue(\"a\", \"First\")\n        for key, text in ((42, \"Note\"), (\" \", \"Note\"), (\"a\", \" \"), (\"b\", None)):\n            with self.subTest(key=key, text=text), self.assertRaises(ValueError):\n                queue.enqueue(key, text)\n        self.assertEqual(queue.snapshot(), [{\"key\": \"a\", \"text\": \"First\"}])\n\n    def test_take_is_fifo_and_releases_key(self):\n        queue = NoteQueue(2)\n        queue.enqueue(\"b\", \"Second letter, first job\")\n        queue.enqueue(\"a\", \"First letter, second job\")\n        self.assertEqual(queue.take()[\"key\"], \"b\")\n        self.assertTrue(queue.enqueue(\"B\", \"New job\"))\n        self.assertEqual([job[\"key\"] for job in queue.snapshot()], [\"a\", \"b\"])\n        self.assertEqual(queue.take()[\"key\"], \"a\")\n        self.assertEqual(queue.take()[\"key\"], \"b\")\n        self.assertIsNone(queue.take())\n\n    def test_snapshot_copies_container_and_mutable_elements(self):\n        queue = NoteQueue(1)\n        queue.enqueue(\"a\", \"First\")\n        view = queue.snapshot()\n        view[0][\"text\"] = \"Changed outside\"\n        view.clear()\n        self.assertEqual(queue.snapshot(), [{\"key\": \"a\", \"text\": \"First\"}])\n\n    def test_instances_have_separate_pending_state(self):\n        left, right = NoteQueue(1), NoteQueue(1)\n        left.enqueue(\"same\", \"Left\")\n        self.assertTrue(right.enqueue(\"same\", \"Right\"))\n        self.assertEqual(left.take()[\"text\"], \"Left\")\n        self.assertEqual(right.take()[\"text\"], \"Right\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"
+    },
+    {
+      "path": "materials/01-inputs.md",
+      "text": "# 输入边界与任务键\n\n来源类型：Agent 原创实例\n标题：输入边界与任务键\nURL：无\n访问事实：2026-10-07，依据本目录原创源码编写；未联网访问外部资料\n适用版本：Python 3.12 或以上；本包 NoteQueue 实现\n原文使用范围：仅原创教材\n\n任务键是区分待处理任务的标识。`raw_key` 是用户输入；`key` 是经过规范化的内部标识。Python 参数上的 `: str` 是类型提示，它不会在运行时阻止调用者传入整数，所以入口仍需要检查。\n\n跟踪 `enqueue(\" A \", \" First \")`：`raw_key` 是字符串 `\" A \"`；`_key` 先检查类型，再用 `strip()` 去两端空格，随后 `casefold()` 消除字母大小写差别，得到 `key=\"a\"`。`text` 的类型和空白检查通过后，存储的是 `\"First\"`。键和值各有自己的用途，不能把正文拿来当去重键。\n\n构造器用 `type(capacity) is int`，表示这里要恰好是整数类型。Python 的布尔值有整数子类型关系；如果用 `isinstance(capacity, int)`，`True` 会进入整数分支。本实例明确把布尔值、浮点数、零和负数拒绝为 `ValueError`，正常 `1` 可以创建队列。\n\n校验顺序是 `_key` → 正文 → 重复键 → 容量 → 写入。无效键或正文不会改变 `_pending`。例如队列已有键 `\"a\"`，再次传入 `(\"a\", \" \")`，正文校验仍先抛出 `ValueError`，不会直接返回去重结果。\n\n这样设计让内部键一致，并让非法请求在写入前停止。代价是大小写不同的键会合并；如果业务要求区分大小写，这个策略需要重新定义。常见错误包括认为类型提示会自动校验、将所有数字接受为容量、先写入再校验，以及误以为 `strip()` 会删除正文内部空格。\n\n请先手算三个输入：`(\" A \", \" First \")`、`(42, \"First\")`、`(\"a\", \" \")`。写出类型、规范化值、停止位置及 `_pending` 是否改变，然后对照 `project/job_queue.py` 与真实 `project/test_job_queue.py`。\n\n验收需要解释成功与拒绝两侧，特别是布尔容量和空正文。源码与原创单元测试可以支持这些特定输入的行为；没有证明用户能脱离提示独立写出校验，也没有证明网络输入解析或生产安全。\n"
+    },
+    {
+      "path": "materials/02-dedup.md",
+      "text": "# 去重范围与判断顺序\n\n来源类型：Agent 原创实例\n标题：去重范围与判断顺序\nURL：无\n访问事实：2026-10-07，依据本目录原创源码编写；未联网访问外部资料\n适用版本：Python 3.12 或以上；本包 NoteQueue 实现\n原文使用范围：仅原创教材\n\n`_pending` 是一个字典，键是规范化任务键，值是包含 `key` 和 `text` 的小字典。`key in self._pending` 问的是“这个键现在是否仍在等待”，而非“这份笔记历史上是否处理过”。`enqueue` 成功返回 `True`，重复待处理键返回 `False`，无容量抛出 `OverflowError`。\n\n设 `capacity=1`，先执行 `enqueue(\"A\", \"First\")`。此时 `_pending` 只有 `\"a\"`，长度为 1。执行 `enqueue(\" a \", \"Replacement\")`：键规范化为 `\"a\"`，正文合法，重复条件为真，于是返回 `False`；长度、原正文与插入顺序均不变。\n\n同一满队列改为 `enqueue(\"b\", \"New\")`：键与正文合法，重复条件为假，容量条件 `1 >= 1` 为真，抛出 `OverflowError`。写入行尚未执行，原任务仍保留。比较这两个输入能看出为什么重复检查必须在容量检查之前。\n\n这个顺序让重复请求得到稳定的去重结果，即使队列已满。返回 `False` 表示没有新增任务；它不代表发生了外部故障。若将容量检查移到去重之前，同一重复键在未满时返回 `False`、满时却抛出异常，契约就改变了。\n\n重复请求不会覆盖正文。需要“更新已有任务”时应该定义另外的业务操作，再确定是否保留排队顺序。把字典赋值直接放在重复判断前会丢掉这一边界。容量限制也只是本实例的待处理条数上限，没有过期、持久化或多实例全局限制。\n\n请预测满队列中的三种情况：有效重复键、有效新键、重复键但空正文。分别写出 `False`、`OverflowError` 或 `ValueError` 的停止位置与保留下来的任务，再提出改变判断顺序会影响哪个结果。\n\n验收要覆盖合法新增、合法重复、容量边界和非法输入，不能只验证抛异常。当前单线程逻辑及单元测试不证明多线程“检查后写入”具有原子性；若增加线程，必须重新设计同步边界。\n"
+    },
+    {
+      "path": "materials/03-lifecycle.md",
+      "text": "# FIFO 与待处理状态变化\n\n来源类型：Agent 原创实例\n标题：FIFO 与待处理状态变化\nURL：无\n访问事实：2026-10-07，依据本目录原创源码编写；未联网访问外部资料\n适用版本：Python 3.12 或以上；本包 NoteQueue 实现\n原文使用范围：仅原创教材\n\nFIFO 表示先进入队列的先被取出。本实现利用字典保留插入顺序这一语言行为；它既不按键的字母顺序排序，也不取最近加入的任务。`iter(self._pending)` 产生键的迭代器，`next(...)` 取第一个键，`pop(oldest_key)` 删除并返回对应任务。\n\n手算：创建容量 2 的队列，加入 `(\"b\", \"First\")`，再加入 `(\"a\", \"Second\")`。内部键顺序为 `b → a`。`take()` 检查非空，令 `oldest_key=\"b\"`，删除 `b`，返回它的数据；内部只剩 `a`。下一次取出是 `a`。\n\n取出释放去重键与容量。上例第一次 `take()` 后，`enqueue(\"B\", \"Again\")` 会成功，键规范化为 `b`，排在 `a` 后面。内部顺序变为 `a → b`。如果待处理状态为空，`take()` 直接返回 `None`，不会执行 `next` 或 `pop`。\n\n状态顺序是“未在队列 → 待处理 → 被取出”。本实例没有“处理成功”状态：取出以后工作者可能失败，但队列已经不再保存该任务。因此不能把这个短例宣称为可靠任务系统，去重范围也没有覆盖处理中或已完成的历史记录。\n\n这样设计保持代码小、行为可手算，适合学习状态转移。若需要失败重试，必须先定义什么时候确认、失败后是否重新排队、重复键在处理中怎么处理，再选择新的数据结构。简单把 `pop` 改为读取会造成每次取出同一个任务且无法释放容量。\n\n请写执行表：操作、返回、待处理键顺序。使用 `enqueue b → enqueue a → take → enqueue B → take → take → take`，逐步追踪。然后说明为什么同一键在取出后能再次入队。\n\n验收不仅要求最终结果，还要说清 `_pending` 在每一步的变化和空队列停止位置。原创测试使用真实对象，没有线程、Spring、HTTP、数据库或模型；它证明单线程内存行为，未证明异步工作、故障恢复或个人独立复现。\n"
+    },
+    {
+      "path": "materials/04-snapshot.md",
+      "text": "# 返回值与可变对象隔离\n\n来源类型：Agent 原创实例\n标题：返回值与可变对象隔离\nURL：无\n访问事实：2026-10-07，依据本目录原创源码编写；未联网访问外部资料\n适用版本：Python 3.12 或以上；本包 NoteQueue 实现\n原文使用范围：仅原创教材\n\n快照是某个时刻的数据副本。Python 的列表和字典可变；如果方法直接返回内部对象，调用者改返回值也可能改队列。本实现的 `snapshot()` 同时创建一个新列表，并对每个任务执行 `dict(job)` 创建新字典。\n\n跟踪：队列已有 `{key:\"a\", text:\"First\"}`。`view=queue.snapshot()` 后，`view` 指向新列表，其第一个元素指向新字典。内部 `_pending[\"a\"]` 指向另一份字典，两者内容相同，但对象不同。执行 `view[0][\"text\"]=\"Outside\"` 和 `view.clear()`，只影响外部副本。再次 `snapshot()`，仍得到原来的 `\"First\"`。\n\n`[job for job in self._pending.values()]` 只创建新列表，元素仍是内部字典。此时 `view.clear()` 不会清空队列，但 `view[0][\"text\"]=\"Outside\"` 会修改内部任务。必须分别检查外层容器与内层元素，不能因为看见新列表就认定完全隔离。\n\n这里 `dict(job)` 是浅拷贝：嵌套对象不会递归复制。当前任务仅包含字符串，字符串本身不可变，因此足以满足本例的隔离要求。如果以后加入可变 `tags` 列表，原先的浅拷贝便不再阻止 `view[0][\"tags\"].append(...)` 影响内部数据，需要重新选择不可变结构或复制策略。\n\n`take()` 先将任务从内部移除，再返回它的字典副本。对已取出结果的修改不会重新创建待处理状态。本实例的读取隔离保护对象所有权，不提供线程同步、多实例一致性或持久化保证。\n\n请预测两种修改：清空外部列表、改外部元素正文。再把快照行假设改为仅复制列表，判断哪一种输入会暴露错误；最后给出含 `tags` 列表时的迁移测试草案。\n\n验收应解释“内容相等”与“引用同一可变对象”的区别，提供修改外部结果后再读取的对照。单元测试只覆盖当前字符串字段，未来新增嵌套可变数据必须追加相应验证。\n"
+    }
+  ],
+  "concepts": [
+    {
+      "id": "note-inputs",
+      "title": "输入校验与键规范化",
+      "group": "输入与数据",
+      "explanation": "类型提示描述期望，不替代运行时校验；任务键用 strip 与 casefold 得到一致表示。",
+      "mechanism": "构造器先拒绝非整数或非正容量。enqueue 先规范化键，再检查正文，之后才进入状态判断。",
+      "why": "把不合法输入挡在写入之前；规范化能合并大小写与边界空格差异，但会改变键的等价关系。",
+      "failures": [
+        "把 True 当作合法整数容量",
+        "以为 : str 会自动拒绝整数",
+        "误把正文内部空格也删掉"
+      ],
+      "lesson": "# 输入边界与任务键\n\n来源类型：Agent 原创实例\n标题：输入边界与任务键\nURL：无\n访问事实：2026-10-07，依据本目录原创源码编写；未联网访问外部资料\n适用版本：Python 3.12 或以上；本包 NoteQueue 实现\n原文使用范围：仅原创教材\n\n任务键是区分待处理任务的标识。`raw_key` 是用户输入；`key` 是经过规范化的内部标识。Python 参数上的 `: str` 是类型提示，它不会在运行时阻止调用者传入整数，所以入口仍需要检查。\n\n跟踪 `enqueue(\" A \", \" First \")`：`raw_key` 是字符串 `\" A \"`；`_key` 先检查类型，再用 `strip()` 去两端空格，随后 `casefold()` 消除字母大小写差别，得到 `key=\"a\"`。`text` 的类型和空白检查通过后，存储的是 `\"First\"`。键和值各有自己的用途，不能把正文拿来当去重键。\n\n构造器用 `type(capacity) is int`，表示这里要恰好是整数类型。Python 的布尔值有整数子类型关系；如果用 `isinstance(capacity, int)`，`True` 会进入整数分支。本实例明确把布尔值、浮点数、零和负数拒绝为 `ValueError`，正常 `1` 可以创建队列。\n\n校验顺序是 `_key` → 正文 → 重复键 → 容量 → 写入。无效键或正文不会改变 `_pending`。例如队列已有键 `\"a\"`，再次传入 `(\"a\", \" \")`，正文校验仍先抛出 `ValueError`，不会直接返回去重结果。\n\n这样设计让内部键一致，并让非法请求在写入前停止。代价是大小写不同的键会合并；如果业务要求区分大小写，这个策略需要重新定义。常见错误包括认为类型提示会自动校验、将所有数字接受为容量、先写入再校验，以及误以为 `strip()` 会删除正文内部空格。\n\n请先手算三个输入：`(\" A \", \" First \")`、`(42, \"First\")`、`(\"a\", \" \")`。写出类型、规范化值、停止位置及 `_pending` 是否改变，然后对照 `project/job_queue.py` 与真实 `project/test_job_queue.py`。\n\n验收需要解释成功与拒绝两侧，特别是布尔容量和空正文。源码与原创单元测试可以支持这些特定输入的行为；没有证明用户能脱离提示独立写出校验，也没有证明网络输入解析或生产安全。\n",
+      "prerequisites": [],
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 11,
+          "quote": "        if type(capacity) is not int or capacity <= 0:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 20,
+          "quote": "        normalized = raw.strip().casefold()",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "materials/01-inputs.md",
+          "line": 1,
+          "quote": "# 输入边界与任务键",
+          "sha256": "f580e90f5cfcc0eb4a8eebea9a3139a9f934d033f569cd40e7801063dcd4333a"
+        }
+      ],
+      "references": []
+    },
+    {
+      "id": "note-dedup",
+      "title": "待处理去重与容量顺序",
+      "group": "状态与流程",
+      "explanation": "字典键只代表当前待处理任务，重复返回 False，不覆盖原正文；容量约束仅计算待处理条数。",
+      "mechanism": "合法输入先检查重复键，再检查容量；两个条件都未阻止时才写入并返回 True。",
+      "why": "让满队列中的有效重复请求仍得到稳定的去重结果；只用内存与单线程，边界容易观察。",
+      "failures": [
+        "先检查容量导致重复请求在满队列时抛异常",
+        "先赋值再去重覆盖旧任务",
+        "把待处理去重误认为历史永久去重"
+      ],
+      "lesson": "# 去重范围与判断顺序\n\n来源类型：Agent 原创实例\n标题：去重范围与判断顺序\nURL：无\n访问事实：2026-10-07，依据本目录原创源码编写；未联网访问外部资料\n适用版本：Python 3.12 或以上；本包 NoteQueue 实现\n原文使用范围：仅原创教材\n\n`_pending` 是一个字典，键是规范化任务键，值是包含 `key` 和 `text` 的小字典。`key in self._pending` 问的是“这个键现在是否仍在等待”，而非“这份笔记历史上是否处理过”。`enqueue` 成功返回 `True`，重复待处理键返回 `False`，无容量抛出 `OverflowError`。\n\n设 `capacity=1`，先执行 `enqueue(\"A\", \"First\")`。此时 `_pending` 只有 `\"a\"`，长度为 1。执行 `enqueue(\" a \", \"Replacement\")`：键规范化为 `\"a\"`，正文合法，重复条件为真，于是返回 `False`；长度、原正文与插入顺序均不变。\n\n同一满队列改为 `enqueue(\"b\", \"New\")`：键与正文合法，重复条件为假，容量条件 `1 >= 1` 为真，抛出 `OverflowError`。写入行尚未执行，原任务仍保留。比较这两个输入能看出为什么重复检查必须在容量检查之前。\n\n这个顺序让重复请求得到稳定的去重结果，即使队列已满。返回 `False` 表示没有新增任务；它不代表发生了外部故障。若将容量检查移到去重之前，同一重复键在未满时返回 `False`、满时却抛出异常，契约就改变了。\n\n重复请求不会覆盖正文。需要“更新已有任务”时应该定义另外的业务操作，再确定是否保留排队顺序。把字典赋值直接放在重复判断前会丢掉这一边界。容量限制也只是本实例的待处理条数上限，没有过期、持久化或多实例全局限制。\n\n请预测满队列中的三种情况：有效重复键、有效新键、重复键但空正文。分别写出 `False`、`OverflowError` 或 `ValueError` 的停止位置与保留下来的任务，再提出改变判断顺序会影响哪个结果。\n\n验收要覆盖合法新增、合法重复、容量边界和非法输入，不能只验证抛异常。当前单线程逻辑及单元测试不证明多线程“检查后写入”具有原子性；若增加线程，必须重新设计同步边界。\n",
+      "prerequisites": [
+        "note-inputs"
+      ],
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 29,
+          "quote": "        if key in self._pending:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 31,
+          "quote": "        if len(self._pending) >= self._capacity:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "materials/02-dedup.md",
+          "line": 1,
+          "quote": "# 去重范围与判断顺序",
+          "sha256": "edda336b1e01fd7f22bfc05d14a772049e9f695b264436b8098c80e61d8a4719"
+        }
+      ],
+      "references": []
+    },
+    {
+      "id": "note-lifecycle",
+      "title": "FIFO 与取出后的状态",
+      "group": "状态与流程",
+      "explanation": "取出顺序按插入顺序。take 会删除待处理任务，释放键和容量；空队列返回 None。",
+      "mechanism": "next(iter(...)) 取首个键，pop 删除并返回数据；取出后同键可以再次入队并排在末尾。",
+      "why": "短状态链便于手算；取出后不保留处理中状态，因此无法保证处理成功或失败重试。",
+      "failures": [
+        "误按字母排序预测取出结果",
+        "将取出等同于处理成功",
+        "只读取而不移除导致容量不能释放"
+      ],
+      "lesson": "# FIFO 与待处理状态变化\n\n来源类型：Agent 原创实例\n标题：FIFO 与待处理状态变化\nURL：无\n访问事实：2026-10-07，依据本目录原创源码编写；未联网访问外部资料\n适用版本：Python 3.12 或以上；本包 NoteQueue 实现\n原文使用范围：仅原创教材\n\nFIFO 表示先进入队列的先被取出。本实现利用字典保留插入顺序这一语言行为；它既不按键的字母顺序排序，也不取最近加入的任务。`iter(self._pending)` 产生键的迭代器，`next(...)` 取第一个键，`pop(oldest_key)` 删除并返回对应任务。\n\n手算：创建容量 2 的队列，加入 `(\"b\", \"First\")`，再加入 `(\"a\", \"Second\")`。内部键顺序为 `b → a`。`take()` 检查非空，令 `oldest_key=\"b\"`，删除 `b`，返回它的数据；内部只剩 `a`。下一次取出是 `a`。\n\n取出释放去重键与容量。上例第一次 `take()` 后，`enqueue(\"B\", \"Again\")` 会成功，键规范化为 `b`，排在 `a` 后面。内部顺序变为 `a → b`。如果待处理状态为空，`take()` 直接返回 `None`，不会执行 `next` 或 `pop`。\n\n状态顺序是“未在队列 → 待处理 → 被取出”。本实例没有“处理成功”状态：取出以后工作者可能失败，但队列已经不再保存该任务。因此不能把这个短例宣称为可靠任务系统，去重范围也没有覆盖处理中或已完成的历史记录。\n\n这样设计保持代码小、行为可手算，适合学习状态转移。若需要失败重试，必须先定义什么时候确认、失败后是否重新排队、重复键在处理中怎么处理，再选择新的数据结构。简单把 `pop` 改为读取会造成每次取出同一个任务且无法释放容量。\n\n请写执行表：操作、返回、待处理键顺序。使用 `enqueue b → enqueue a → take → enqueue B → take → take → take`，逐步追踪。然后说明为什么同一键在取出后能再次入队。\n\n验收不仅要求最终结果，还要说清 `_pending` 在每一步的变化和空队列停止位置。原创测试使用真实对象，没有线程、Spring、HTTP、数据库或模型；它证明单线程内存行为，未证明异步工作、故障恢复或个人独立复现。\n",
+      "prerequisites": [
+        "note-dedup"
+      ],
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 39,
+          "quote": "        oldest_key = next(iter(self._pending))",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 40,
+          "quote": "        return dict(self._pending.pop(oldest_key))",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "materials/03-lifecycle.md",
+          "line": 1,
+          "quote": "# FIFO 与待处理状态变化",
+          "sha256": "e0f0bdc46258e43014a68b7e870a03cb862d1f66dd1b58ce415ebd6e18825ecf"
+        }
+      ],
+      "references": []
+    },
+    {
+      "id": "note-snapshot",
+      "title": "副本、引用与读取隔离",
+      "group": "对象与隔离",
+      "explanation": "列表与字典可变。快照复制外层列表和每个任务字典，调用者修改当前返回值不会修改内部任务。",
+      "mechanism": "列表推导式生成新列表；dict(job) 生成新字典。当前字符串字段不可变，浅拷贝足以隔离本例。",
+      "why": "保护内部状态所有权；若新增嵌套可变字段，需要重新验证浅拷贝的边界。",
+      "failures": [
+        "只复制列表导致元素仍共享",
+        "将内容相等误当成对象相同",
+        "以为浅拷贝能递归复制 tags 列表"
+      ],
+      "lesson": "# 返回值与可变对象隔离\n\n来源类型：Agent 原创实例\n标题：返回值与可变对象隔离\nURL：无\n访问事实：2026-10-07，依据本目录原创源码编写；未联网访问外部资料\n适用版本：Python 3.12 或以上；本包 NoteQueue 实现\n原文使用范围：仅原创教材\n\n快照是某个时刻的数据副本。Python 的列表和字典可变；如果方法直接返回内部对象，调用者改返回值也可能改队列。本实现的 `snapshot()` 同时创建一个新列表，并对每个任务执行 `dict(job)` 创建新字典。\n\n跟踪：队列已有 `{key:\"a\", text:\"First\"}`。`view=queue.snapshot()` 后，`view` 指向新列表，其第一个元素指向新字典。内部 `_pending[\"a\"]` 指向另一份字典，两者内容相同，但对象不同。执行 `view[0][\"text\"]=\"Outside\"` 和 `view.clear()`，只影响外部副本。再次 `snapshot()`，仍得到原来的 `\"First\"`。\n\n`[job for job in self._pending.values()]` 只创建新列表，元素仍是内部字典。此时 `view.clear()` 不会清空队列，但 `view[0][\"text\"]=\"Outside\"` 会修改内部任务。必须分别检查外层容器与内层元素，不能因为看见新列表就认定完全隔离。\n\n这里 `dict(job)` 是浅拷贝：嵌套对象不会递归复制。当前任务仅包含字符串，字符串本身不可变，因此足以满足本例的隔离要求。如果以后加入可变 `tags` 列表，原先的浅拷贝便不再阻止 `view[0][\"tags\"].append(...)` 影响内部数据，需要重新选择不可变结构或复制策略。\n\n`take()` 先将任务从内部移除，再返回它的字典副本。对已取出结果的修改不会重新创建待处理状态。本实例的读取隔离保护对象所有权，不提供线程同步、多实例一致性或持久化保证。\n\n请预测两种修改：清空外部列表、改外部元素正文。再把快照行假设改为仅复制列表，判断哪一种输入会暴露错误；最后给出含 `tags` 列表时的迁移测试草案。\n\n验收应解释“内容相等”与“引用同一可变对象”的区别，提供修改外部结果后再读取的对照。单元测试只覆盖当前字符串字段，未来新增嵌套可变数据必须追加相应验证。\n",
+      "prerequisites": [
+        "note-inputs"
+      ],
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 43,
+          "quote": "        return [dict(job) for job in self._pending.values()]",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 14,
+          "quote": "        self._pending: dict[str, dict[str, str]] = {}",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "materials/04-snapshot.md",
+          "line": 1,
+          "quote": "# 返回值与可变对象隔离",
+          "sha256": "b621b41bd067620ab29c8dc462c56d97f12ec844c817e8654d59e4f22c70ee70"
+        }
+      ],
+      "references": []
+    }
+  ],
+  "activities": [
+    {
+      "id": "note-q01",
+      "concept_id": "note-inputs",
+      "kind": "predict",
+      "title": "从原始键到内部键",
+      "prompt": "新建 NoteQueue(2)，执行 enqueue(\" A \", \" First \")，然后 snapshot()。返回值与快照是什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "True；[{\"key\":\" A \",\"text\":\"First\"}]"
+        },
+        {
+          "id": "b",
+          "text": "True；[{\"key\":\"a\",\"text\":\"First\"}]"
+        },
+        {
+          "id": "c",
+          "text": "False；[]"
+        },
+        {
+          "id": "d",
+          "text": "True；[{\"key\":\"a\",\"text\":\" First \"}]"
+        }
+      ],
+      "answer_ids": [
+        "b"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "分别跟踪键与正文。",
+        "_key 的结果用于字典键，写入行又处理正文。",
+        "先写 raw_key → normalized 的值，再写存储的 text；两个转换并非同一个变量。"
+      ],
+      "explanation": "B 正确：strip 去键与正文两端空格，键再 casefold 成 a，首次合法入队返回 True。A 忽略键规范化；C 把首次入队当重复；D 忽略正文的 strip。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 20,
+          "quote": "        normalized = raw.strip().casefold()",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 33,
+          "quote": "        self._pending[key] = {\"key\": key, \"text\": text.strip()}",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q02",
+      "concept_id": "note-inputs",
+      "kind": "predict",
+      "title": "整数容量的边界",
+      "prompt": "分别新建 NoteQueue(True)、NoteQueue(0)、NoteQueue(1)、NoteQueue(2.0)。哪组创建结果符合当前构造器？",
+      "options": [
+        {
+          "id": "a",
+          "text": "只有 1 成功，其余 ValueError"
+        },
+        {
+          "id": "b",
+          "text": "True 和 1 成功，其余 ValueError"
+        },
+        {
+          "id": "c",
+          "text": "1 和 2.0 成功，其余 ValueError"
+        },
+        {
+          "id": "d",
+          "text": "四种都成功"
+        }
+      ],
+      "answer_ids": [
+        "a"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "查看构造器的两项条件。",
+        "先分类型，再判断 <= 0；不要只比较数值。",
+        "可列两列：type 是否正好 int、值是否大于零。必须两列同时满足。"
+      ],
+      "explanation": "A 正确：type(capacity) 必须恰好为 int 且值大于零。True 的实际类型是 bool；0 非正；2.0 是 float。B 把布尔子类型关系套到 type 检查；C 把数值相等套到类型判断；D 忽略全部校验。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 11,
+          "quote": "        if type(capacity) is not int or capacity <= 0:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q03",
+      "concept_id": "note-inputs",
+      "kind": "predict",
+      "title": "类型提示之外的真实校验",
+      "prompt": "新建 NoteQueue(2)，调用 enqueue(42, \"Note\")。假定调用直接来自 Python，而非外部解析器，结果是什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "键自动变成字符串 42，入队 True"
+        },
+        {
+          "id": "b",
+          "text": "因 : str 注解而在进入方法前抛 TypeError"
+        },
+        {
+          "id": "c",
+          "text": "返回 False，队列保持空"
+        },
+        {
+          "id": "d",
+          "text": "_key 抛 ValueError，队列保持空"
+        }
+      ],
+      "answer_ids": [
+        "d"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "从 enqueue 第一句开始。",
+        "函数参数注解与函数体内检查是两件事。",
+        "找 _key 第一个可能抛出的异常，并确认写入行是否已执行。"
+      ],
+      "explanation": "D 正确：注解不做自动运行时阻拦；_key 的 isinstance 检查发现 raw 为整数并抛 ValueError，尚未写入。A 虚构字符串转换；B 把注解当校验器；C 将非法输入混同重复键。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 26,
+          "quote": "        key = self._key(raw_key)",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 18,
+          "quote": "        if not isinstance(raw, str):",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q04",
+      "concept_id": "note-dedup",
+      "kind": "predict",
+      "title": "满队列中的有效重复",
+      "prompt": "NoteQueue(1) 已成功加入 (\"a\", \"First\")。再次 enqueue(\" A \", \"Replacement\")，哪种结果正确？",
+      "options": [
+        {
+          "id": "a",
+          "text": "抛 OverflowError，原任务保留"
+        },
+        {
+          "id": "b",
+          "text": "返回 True，正文替换为 Replacement"
+        },
+        {
+          "id": "c",
+          "text": "返回 False，正文仍为 First"
+        },
+        {
+          "id": "d",
+          "text": "返回 False，正文替换为 Replacement"
+        }
+      ],
+      "answer_ids": [
+        "c"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "找到最先成立的 if。",
+        "比较重复条件与容量条件的先后。",
+        "遇到 return False 后停止，后面的容量和赋值均不执行。"
+      ],
+      "explanation": "C 正确：规范化后仍为 a，重复判断先于容量，提前返回 False 且未覆盖。A 交换了判断顺序；B 虚构更新操作；D 忽略赋值在提前返回之后。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 29,
+          "quote": "        if key in self._pending:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 31,
+          "quote": "        if len(self._pending) >= self._capacity:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q05",
+      "concept_id": "note-dedup",
+      "kind": "predict",
+      "title": "满队列中的新任务",
+      "prompt": "NoteQueue(1) 已成功加入 (\"a\", \"First\")。enqueue(\"b\", \"New\") 的结果与状态是什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "返回 False，保留 a"
+        },
+        {
+          "id": "b",
+          "text": "抛 OverflowError，仍只保留 a"
+        },
+        {
+          "id": "c",
+          "text": "抛 OverflowError，但 a 和 b 均保留"
+        },
+        {
+          "id": "d",
+          "text": "返回 True，移除 a 后保留 b"
+        }
+      ],
+      "answer_ids": [
+        "b"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "分别判断重复与长度。",
+        "写入行位于容量检查之后。",
+        "初始 len=1、capacity=1，代入 >=；异常后没有新的字典元素。"
+      ],
+      "explanation": "B 正确：b 不是重复键，但待处理长度已达到容量，异常发生在写入前。A 混淆去重与满队列；C 误认为异常之后继续赋值；D 虚构自动淘汰。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 31,
+          "quote": "        if len(self._pending) >= self._capacity:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 32,
+          "quote": "            raise OverflowError(\"pending queue is full\")",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q06",
+      "concept_id": "note-dedup",
+      "kind": "predict",
+      "title": "非法重复请求先在哪里停止",
+      "prompt": "NoteQueue(1) 已成功加入 (\"a\", \"First\")。enqueue(\"a\", \" \") 会发生什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "抛 ValueError，原任务保留"
+        },
+        {
+          "id": "b",
+          "text": "返回 False，原任务保留"
+        },
+        {
+          "id": "c",
+          "text": "抛 OverflowError，原任务保留"
+        },
+        {
+          "id": "d",
+          "text": "返回 True，正文变为空字符串"
+        }
+      ],
+      "answer_ids": [
+        "a"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "按源码顺序检查每个条件。",
+        "正文检查发生在重复检查之前。",
+        "把空白字符串执行 strip 的结果代入 not 条件，标出第一处 raise。"
+      ],
+      "explanation": "A 正确：正文先校验，空白经 strip 后为空，立即 ValueError。B 跳过了正文检查；C 跳到更晚的容量判断；D 虚构写入非法正文。有效重复返回 False 不意味着无效重复也绕过校验。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 27,
+          "quote": "        if not isinstance(text, str) or not text.strip():",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 29,
+          "quote": "        if key in self._pending:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q07",
+      "concept_id": "note-lifecycle",
+      "kind": "predict",
+      "title": "字母顺序与入队顺序",
+      "prompt": "NoteQueue(2) 依次加入 (\"b\", \"First\")、(\"a\", \"Second\")。第一次 take() 的键与剩余键是什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "取 a，剩 b"
+        },
+        {
+          "id": "b",
+          "text": "取 b，仍剩 b、a"
+        },
+        {
+          "id": "c",
+          "text": "取 b，剩 a"
+        },
+        {
+          "id": "d",
+          "text": "取 a，队列清空"
+        }
+      ],
+      "answer_ids": [
+        "c"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "写下入队的时间顺序。",
+        "iter 字典产出键，next 取首键，pop 删除这一键。",
+        "顺序是 b→a；不要先排序。只对 oldest_key 执行一次 pop。"
+      ],
+      "explanation": "C 正确：字典按插入顺序迭代，b 最早；pop 删除 b，内部剩 a。A 按字母排序；B 忽略 pop 删除；D 同时误解顺序与删除范围。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 39,
+          "quote": "        oldest_key = next(iter(self._pending))",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 40,
+          "quote": "        return dict(self._pending.pop(oldest_key))",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q08",
+      "concept_id": "note-lifecycle",
+      "kind": "predict",
+      "title": "取出后重复键能否重新入队",
+      "prompt": "NoteQueue(2) 加入 (\"b\", \"First\")、(\"a\", \"Second\")，take() 一次，随后 enqueue(\"B\", \"Again\")。返回与快照键顺序是什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "False；[a]"
+        },
+        {
+          "id": "b",
+          "text": "True；[b,a]"
+        },
+        {
+          "id": "c",
+          "text": "OverflowError；[a]"
+        },
+        {
+          "id": "d",
+          "text": "True；[a,b]"
+        }
+      ],
+      "answer_ids": [
+        "d"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "先完成 take，再计算下一次入队。",
+        "重复检查只查询此刻 _pending，没有历史集合。",
+        "取出后键列表只有 a，插入新 b 时排在末尾。"
+      ],
+      "explanation": "D 正确：take 已删除 b，释放键和一个容量；B 规范化为 b，重新插入到 a 后。A 把待处理去重当永久历史去重；B 虚构保留旧位置；C 忽略容量释放。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 40,
+          "quote": "        return dict(self._pending.pop(oldest_key))",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 33,
+          "quote": "        self._pending[key] = {\"key\": key, \"text\": text.strip()}",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q09",
+      "concept_id": "note-lifecycle",
+      "kind": "predict",
+      "title": "空队列的停止位置",
+      "prompt": "新建 NoteQueue(1)，尚未入队。take() 与 snapshot() 分别返回什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "None；[]"
+        },
+        {
+          "id": "b",
+          "text": "{}；[]"
+        },
+        {
+          "id": "c",
+          "text": "抛 StopIteration；[]"
+        },
+        {
+          "id": "d",
+          "text": "None；None"
+        }
+      ],
+      "answer_ids": [
+        "a"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "分别阅读两个方法的返回语句。",
+        "take 空分支早于 next，snapshot 始终构造列表。",
+        "先确认 if not _pending 成立，再观察空迭代的列表推导式。"
+      ],
+      "explanation": "A 正确：take 在空检查处提前 None；snapshot 对空 values 构造空列表。B 虚构空字典；C 忽略 next 前的空检查；D 混淆两个方法的返回类型。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 37,
+          "quote": "        if not self._pending:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 43,
+          "quote": "        return [dict(job) for job in self._pending.values()]",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q10",
+      "concept_id": "note-snapshot",
+      "kind": "predict",
+      "title": "清空返回列表的影响",
+      "prompt": "队列已加入 (\"a\", \"First\")。执行 view=queue.snapshot(); view.clear() 后，再次 snapshot() 得到什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "[]"
+        },
+        {
+          "id": "b",
+          "text": "[{\"key\":\"a\",\"text\":\"First\"}]"
+        },
+        {
+          "id": "c",
+          "text": "抛 OverflowError"
+        },
+        {
+          "id": "d",
+          "text": "[{\"key\":\"a\",\"text\":\"\"}]"
+        }
+      ],
+      "answer_ids": [
+        "b"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "确认返回列表如何创建。",
+        "画外部 view 与内部 _pending 两个引用。",
+        "clear 操作的是新列表；源码没有调用 _pending.clear。"
+      ],
+      "explanation": "B 正确：列表推导式创建新列表，清空 view 只清空返回容器。A 误认它是内部容器；C 将读取与容量检查混合；D 将列表 clear 当作修改元素正文。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 43,
+          "quote": "        return [dict(job) for job in self._pending.values()]",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q11",
+      "concept_id": "note-snapshot",
+      "kind": "predict",
+      "title": "修改快照中的元素",
+      "prompt": "队列已加入 (\"a\", \"First\")。执行 view=queue.snapshot(); view[0][\"text\"]=\"Outside\"，再 snapshot() 的正文是什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "Outside，因为浅拷贝不复制任何对象"
+        },
+        {
+          "id": "b",
+          "text": "Outside，因为字典都是同一个引用"
+        },
+        {
+          "id": "c",
+          "text": "抛 TypeError，字典不可变"
+        },
+        {
+          "id": "d",
+          "text": "First，因为任务字典也复制了"
+        }
+      ],
+      "answer_ids": [
+        "d"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "除了新列表，还看元素如何得到。",
+        "dict(job) 和直接返回 job 的对象身份不同。",
+        "分别标两个任务字典，它们最初内容相等，但改一个键值不会改另一个。"
+      ],
+      "explanation": "D 正确：dict(job) 创建每个任务的新字典，修改副本的 text 不影响原字典。A 对浅拷贝定义错误：它复制当前字典但不递归复制嵌套可变值；B 忽略 dict(job)；C 将字典当不可变对象。当前字符串值满足隔离边界。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 43,
+          "quote": "        return [dict(job) for job in self._pending.values()]",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q12",
+      "concept_id": "note-snapshot",
+      "kind": "predict",
+      "title": "两个实例的状态是否共享",
+      "prompt": "left=NoteQueue(1)、right=NoteQueue(1)。left 加入 (\"same\", \"Left\") 后，right.enqueue(\"same\", \"Right\") 与 left.take()[\"text\"] 的结果是什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "False；Right"
+        },
+        {
+          "id": "b",
+          "text": "OverflowError；Left"
+        },
+        {
+          "id": "c",
+          "text": "True；Left"
+        },
+        {
+          "id": "d",
+          "text": "True；Right"
+        }
+      ],
+      "answer_ids": [
+        "c"
+      ],
+      "rubric": [
+        "按当前实现准确预测结果",
+        "说明实际停止位置与状态变化"
+      ],
+      "hints": [
+        "找 _pending 是在哪里创建的。",
+        "两次构造分别作用于两个 self。",
+        "画 left→字典1、right→字典2，两个同名键仍属于不同容器。"
+      ],
+      "explanation": "C 正确：构造器为每个 self 建立自己的 _pending 字典，right 初始为空，因此成功；left 保留自己的正文。A 把实例状态当全局去重并覆盖；B 把另一实例长度带入容量判断；D 虚构共享存储。多实例各自独立也不等于提供全局去重。 本题只证明该输入的预测，不证明独立实现或生产能力。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 14,
+          "quote": "        self._pending: dict[str, dict[str, str]] = {}",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-trace",
+      "concept_id": "note-lifecycle",
+      "kind": "trace",
+      "title": "逐行手算一个完整状态链",
+      "prompt": "不运行。NoteQueue(2) 依次 enqueue(\"B\",\"First\")、enqueue(\" a \",\"Second\")、take()、enqueue(\" b \",\"Again\")、snapshot()。提交每一步返回值、key 的值、_pending 的键顺序和停止位置；说明去重覆盖哪个阶段。",
+      "options": [],
+      "answer_ids": [],
+      "rubric": [
+        "键规范化值准确",
+        "各操作返回值与异常准确",
+        "每一步键顺序与长度准确",
+        "说明取出释放键但不证明处理成功"
+      ],
+      "explanation": "需要人工或 Agent 逐项复核执行表。应能跟踪未写入、待处理、取出三种状态，按真实条件而非最终答案猜过程。静态手算不证明线程、外部服务、持久化或独立实现。",
+      "hints": [
+        "为每一次操作画单独一行。",
+        "先规范化，再校验，再看字典；take 要把移除记录进下一步。",
+        "表头可用：操作｜返回｜局部 key｜待处理键顺序｜当前长度。只给表头，实际值由你填。"
+      ],
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 20,
+          "quote": "        normalized = raw.strip().casefold()",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 40,
+          "quote": "        return dict(self._pending.pop(oldest_key))",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-debug",
+      "concept_id": "note-snapshot",
+      "kind": "debug",
+      "title": "为什么清空列表测试漏掉共享元素",
+      "prompt": "有人把 snapshot 改成 return list(self._pending.values())，仍用 view.clear() 后再次读取作为唯一测试并通过。解释这个测试为什么没命中缺陷；写一个会失败的最小测试草案，说明期望与实际，并提出最小修复。保持原项目只读，在自己的练习区操作。",
+      "options": [],
+      "answer_ids": [],
+      "rubric": [
+        "区分外层列表与任务字典的引用",
+        "用修改返回元素正文触发共享问题",
+        "再次读取原正文作为正确期望",
+        "修复复制任务字典而非放宽断言",
+        "未运行时明确标为草案"
+      ],
+      "explanation": "外层 list 已复制，clear 不能暴露内层字典共享。需要改 view[0] 的 text 再读取，以保持原状态不变为期望；当前源码逐个 dict(job) 是相应的保护。评阅需检查真实执行或静态草案的证据，不能自动给关键词分数。",
+      "hints": [
+        "找出仍然是原对象的那一层。",
+        "分别准备清空列表与修改列表元素两组对照。",
+        "测试形状：入队 → snapshot → view[0][\"text\"] 改值 → 再 snapshot 断言原正文。具体断言与运行记录由你写。"
+      ],
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 43,
+          "quote": "        return [dict(job) for job in self._pending.values()]",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-reproduce",
+      "concept_id": "note-dedup",
+      "kind": "reproduce",
+      "title": "独立复现小型待处理队列",
+      "prompt": "脱离源码，在自己的练习区实现容量固定的待处理队列：规范化文本键；非法输入提前停止；重复合法键返回 False 且不覆盖；满队列新键拒绝；取出最早键后允许同键重入；快照修改不影响内部。可以换方法名，但要保留这些契约。提交实现、6组以上输入的预期、实际测试命令与结果，注明是否看过提示。",
+      "options": [],
+      "answer_ids": [],
+      "rubric": [
+        "合法新增与规范化有对照",
+        "非法输入不改变内部状态",
+        "满队列中重复和新键不同结果",
+        "FIFO 与取出后重入正确",
+        "快照容器与元素隔离",
+        "实际测试或尚未运行明确区分",
+        "辅助程度与独立性证据如实记录"
+      ],
+      "explanation": "这是独立复现验收，开放回答保持待复核。逐项核对设计与测试，不能用随机检测80%代替复现。若只提交片段或预期，不能宣布已运行。用真实队列对象的单元测试仍不覆盖HTTP、数据库、模型、并发或可靠任务处理。",
+      "hints": [
+        "先写允许状态与方法的输入输出。",
+        "按校验→去重→容量→写入排序，再单独安排取出和快照。",
+        "只给验收输入类别：首次成功、重复、无效、容量边界、FIFO重入、快照修改。实现和断言由你补全。"
+      ],
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 29,
+          "quote": "        if key in self._pending:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 31,
+          "quote": "        if len(self._pending) >= self._capacity:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 43,
+          "quote": "        return [dict(job) for job in self._pending.values()]",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-transfer",
+      "concept_id": "note-lifecycle",
+      "kind": "transfer",
+      "title": "延迟迁移：取出不再释放去重键",
+      "prompt": "建议首次练习48小时后再做，先不看旧答案。新要求：同键在待处理或处理中都去重；工作者成功确认后释放键，失败时可重回队尾。请先说明现有 take 为什么不满足，再设计 pending/inflight 两种状态及 take、confirm、retry 的最小职责。给出处理中重复、成功后重入、失败重试与未知键确认四组验收；说明容量是否包含处理中，并保持定义一致。不要直接修改原实例。",
+      "options": [],
+      "answer_ids": [],
+      "rubric": [
+        "指出现有pop立即释放键与新需求冲突",
+        "待处理与处理中状态明确且迁移一致",
+        "处理中重复与成功后重入各有对照",
+        "失败重试不丢失或重复任务",
+        "容量与未知键策略明确",
+        "记录实际间隔、提示与源码版本"
+      ],
+      "explanation": "评阅关注原理迁移与定义一致性。现有实现只有pending，取出就pop；新需求需要保留inflight键并明确确认/重试。不同合理容量或未知键策略可接受，但必须有两侧测试。设置48小时仅是建议，未实际延迟与独立完成不构成迁移证据；内存方案仍无崩溃恢复保证。",
+      "hints": [
+        "先画当前状态，再加入处理中状态。",
+        "给每个方法标注从哪个集合移出、加入哪个集合，以及去重查询哪些集合。",
+        "状态图可起步为 pending→inflight→成功释放；失败返回pending。你还需自己定义键、容量和异常契约。"
+      ],
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 40,
+          "quote": "        return dict(self._pending.pop(oldest_key))",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        },
+        {
+          "path": "project/job_queue.py",
+          "line": 29,
+          "quote": "        if key in self._pending:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ],
+      "due_after_hours": 48
+    },
+    {
+      "id": "note-q13",
+      "concept_id": "note-inputs",
+      "kind": "predict",
+      "title": "类型提示与运行时键校验",
+      "prompt": "直接调用enqueue(42,\"Note\")。哪些判断正确？",
+      "options": [
+        {
+          "id": "a",
+          "text": "参数注解不会在进入函数之前自动拦截整数"
+        },
+        {
+          "id": "b",
+          "text": "_key的真实类型检查会拒绝整数并抛ValueError"
+        },
+        {
+          "id": "c",
+          "text": "整数自动变成字符串并入队"
+        },
+        {
+          "id": "d",
+          "text": "因为非法输入所以仍需要先写入再回滚"
+        }
+      ],
+      "answer_ids": [
+        "a",
+        "b"
+      ],
+      "rubric": [
+        "依据当前实现选择完整正确集合"
+      ],
+      "hints": [
+        "先确认输入与当前_pending。",
+        "按检查、状态变化、返回逐步判断。",
+        "用合法成功和停止示例排除没有执行的过程。"
+      ],
+      "explanation": "“注解不自动拦截”和“_key类型检查拒绝”正确。源码没有str转换；异常在任何状态写入之前发生，不需要虚构回滚。 这是该机制的回忆题，不证明独立实现。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 18,
+          "quote": "        if not isinstance(raw, str):",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q14",
+      "concept_id": "note-dedup",
+      "kind": "predict",
+      "title": "非法重复与有效重复的区别",
+      "prompt": "容量1已存a/First，调用enqueue(\"a\",\" \")。哪些判断正确？",
+      "options": [
+        {
+          "id": "a",
+          "text": "键规范化成功"
+        },
+        {
+          "id": "b",
+          "text": "正文检查先于去重并抛ValueError"
+        },
+        {
+          "id": "c",
+          "text": "既有任务与容量占用保持不变"
+        },
+        {
+          "id": "d",
+          "text": "重复检查返回False，所以正文不必校验"
+        }
+      ],
+      "answer_ids": [
+        "a",
+        "b",
+        "c"
+      ],
+      "rubric": [
+        "依据当前实现选择完整正确集合"
+      ],
+      "hints": [
+        "先确认输入与当前_pending。",
+        "按检查、状态变化、返回逐步判断。",
+        "用合法成功和停止示例排除没有执行的过程。"
+      ],
+      "explanation": "键合法，随后空白正文在去重之前被拒绝，且写入没有发生。前三项正确；“重复先返回False”交换了源码检查顺序。 这是该机制的回忆题，不证明独立实现。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 27,
+          "quote": "        if not isinstance(text, str) or not text.strip():",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    },
+    {
+      "id": "note-q15",
+      "concept_id": "note-lifecycle",
+      "kind": "predict",
+      "title": "当前队列的保证边界",
+      "prompt": "哪些能力能从当前源码得到依据？",
+      "options": [
+        {
+          "id": "a",
+          "text": "待处理键去重"
+        },
+        {
+          "id": "b",
+          "text": "固定容量写入前检查"
+        },
+        {
+          "id": "c",
+          "text": "按插入顺序取出并释放键"
+        },
+        {
+          "id": "d",
+          "text": "为当前字符串字段提供副本读取隔离"
+        },
+        {
+          "id": "e",
+          "text": "崩溃后从数据库恢复任务并自动重试"
+        }
+      ],
+      "answer_ids": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ],
+      "rubric": [
+        "依据当前实现选择完整正确集合"
+      ],
+      "hints": [
+        "先确认输入与当前_pending。",
+        "按检查、状态变化、返回逐步判断。",
+        "用合法成功和停止示例排除没有执行的过程。"
+      ],
+      "explanation": "前三项可从enqueue与take得到依据，副本隔离由snapshot的新列表和dict复制提供，当前字段是不可变字符串。“数据库恢复并重试”没有代码、状态或运行证据支持。 这是该机制的回忆题，不证明独立实现。",
+      "evidence": [
+        {
+          "path": "project/job_queue.py",
+          "line": 9,
+          "quote": "class NoteQueue:",
+          "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+        }
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "note-enqueue",
+      "title": "任务入队",
+      "summary": "把原始文本变为待处理任务。以下值依据源码手算；单线程真实内存对象，没有框架、HTTP、数据库或模型。",
+      "scenario": "学习者提交一条待复习笔记，希望重复键保留旧任务，新键在容量允许时入队。",
+      "input": "已创建 NoteQueue(2)，依次调用 enqueue(\" A \", \" First \")、snapshot()。",
+      "expected": "enqueue 返回 True，snapshot 为 [{\"key\":\"a\",\"text\":\"First\"}]；非法、重复和容量满均在写入前停止。",
+      "steps": [
+        {
+          "id": "normalize",
+          "title": "先把任务键统一成内部标识",
+          "actor": "队列入口：NoteQueue.enqueue → NoteQueue._key",
+          "action": "enqueue 直接调用 self._key(raw_key)。_key 检查 str，依次 strip、casefold，再拒绝空键并返回。",
+          "input": "raw_key=\" A \"，str；队列初始为空",
+          "output": "局部 key=\"a\"，str",
+          "why": "相同含义的键先统一，再谈去重；类型提示不会自动校验调用输入。",
+          "concept_ids": [
+            "note-inputs"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 26,
+              "quote": "        key = self._key(raw_key)",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            },
+            {
+              "path": "project/job_queue.py",
+              "line": 18,
+              "quote": "        if not isinstance(raw, str):",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            },
+            {
+              "path": "project/job_queue.py",
+              "line": 20,
+              "quote": "        normalized = raw.strip().casefold()",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "enqueue-enter",
+              "signature": "NoteQueue.enqueue(raw_key: str, text: str) -> bool",
+              "relation": "call",
+              "input": "调用者原始key与正文；注解不是自动校验",
+              "output": "进入后第一句调用_key",
+              "why": "保留原始值，再进行规范化。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 25,
+                  "quote": "    def enqueue(self, raw_key: str, text: str) -> bool:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-enter",
+              "signature": "NoteQueue._key(raw: str) -> str",
+              "relation": "call",
+              "input": "raw是同一原始键",
+              "output": "先检查实际运行时类型",
+              "why": "静态方法只处理一个值，不访问队列状态。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 17,
+                  "quote": "    def _key(raw: str) -> str:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-type",
+              "signature": "isinstance(raw, str)",
+              "relation": "return",
+              "input": "raw真实对象",
+              "output": "bool：是否字符串",
+              "why": "整数42必须在字符串方法之前被拒绝。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 18,
+                  "quote": "        if not isinstance(raw, str):",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-strip",
+              "signature": "str.strip()",
+              "relation": "return",
+              "input": "原始键例如\" A \"",
+              "output": "中间结果\"A\"",
+              "why": "先去两端空白，原始字符串没有原地修改。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 20,
+                  "quote": "        normalized = raw.strip().casefold()",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-casefold",
+              "signature": "str.casefold()",
+              "relation": "return",
+              "input": "strip结果例如\"A\"",
+              "output": "normalized=\"a\"",
+              "why": "统一大小写后再作为字典键。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 20,
+                  "quote": "        normalized = raw.strip().casefold()",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-return",
+              "signature": "NoteQueue._key(raw: str) -> str",
+              "relation": "return",
+              "input": "规范化非空文本",
+              "output": "返回str，enqueue局部key随后完成绑定",
+              "why": "调用者只有正常返回后才有新局部key。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 23,
+                  "quote": "        return normalized",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-stop",
+              "signature": "ValueError(str)，由NoteQueue._key抛出",
+              "relation": "stop",
+              "input": "非文本或规范化为空",
+              "output": "异常传播到enqueue，未进入正文校验或写入",
+              "why": "原代码不自动转字符串或吞掉异常。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 19,
+                  "quote": "            raise ValueError(\"key must be text\")",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "body",
+          "title": "正文是否合法，先在这里决定",
+          "actor": "队列入口：NoteQueue.enqueue",
+          "action": "检查正文类型与 strip 后是否为空。非法则 raise ValueError，后续不执行。",
+          "input": "text=\" First \"，str；key=\"a\"",
+          "output": "有效正文继续；当前 text 仍是原字符串，存储时才 strip",
+          "why": "重复请求也应满足输入约束，不能先去重而跳过非法正文。",
+          "concept_ids": [
+            "note-inputs",
+            "note-dedup"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 27,
+              "quote": "        if not isinstance(text, str) or not text.strip():",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "body-type",
+              "signature": "isinstance(text, str)",
+              "relation": "return",
+              "input": "原始正文对象",
+              "output": "bool：是否str",
+              "why": "or短路：非文本时不调用strip。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 27,
+                  "quote": "        if not isinstance(text, str) or not text.strip():",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "body-strip",
+              "signature": "str.strip()",
+              "relation": "return",
+              "input": "已确认是字符串的text",
+              "output": "仅用于空白检查的str；text局部仍保存原值",
+              "why": "检查与最终存储是两次表达式求值。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 27,
+                  "quote": "        if not isinstance(text, str) or not text.strip():",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "body-stop",
+              "signature": "ValueError(str)，由NoteQueue.enqueue抛出",
+              "relation": "stop",
+              "input": "非字符串或仅空白正文",
+              "output": "异常，去重与容量未执行；状态保留",
+              "why": "非法重复请求也要先拒绝。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 28,
+                  "quote": "            raise ValueError(\"text must not be blank\")",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "duplicate",
+          "title": "查看此键是否已经在等待",
+          "actor": "队列入口：NoteQueue.enqueue",
+          "action": "在当前 _pending 字典查 key；存在就直接 return False，保留旧任务。",
+          "input": "key=\"a\"；当前 _pending={}",
+          "output": "本次不存在，继续；存在时返回 bool False",
+          "why": "去重只覆盖待处理键；满队列中的有效重复仍得到 False。",
+          "concept_ids": [
+            "note-dedup"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 29,
+              "quote": "        if key in self._pending:",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "duplicate-result",
+              "signature": "dict.__contains__(key)（in 成员检查）",
+              "relation": "return",
+              "input": "key与当前_pending",
+              "output": "bool：键是否正在待处理",
+              "why": "这是字典成员查询，不是数据库访问。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 29,
+                  "quote": "        if key in self._pending:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "duplicate-return",
+              "signature": "NoteQueue.enqueue(raw_key: str, text: str) -> bool",
+              "relation": "stop",
+              "input": "key确实已在_pending",
+              "output": "提前False；不检查容量，不覆盖旧正文",
+              "why": "有效重复与非法输入是不同结果。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 30,
+                  "quote": "            return False",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "capacity",
+          "title": "新任务还放得下吗",
+          "actor": "队列入口：NoteQueue.enqueue",
+          "action": "比较 len(_pending) 与 _capacity；已满则 raise OverflowError。只有新键能走到这里。",
+          "input": "len(_pending)=0，int；_capacity=2，int",
+          "output": "0 >= 2 为 False，继续写入",
+          "why": "在写入之前约束容量，异常不会插入一半任务。",
+          "concept_ids": [
+            "note-dedup"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 31,
+              "quote": "        if len(self._pending) >= self._capacity:",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            },
+            {
+              "path": "project/job_queue.py",
+              "line": 32,
+              "quote": "            raise OverflowError(\"pending queue is full\")",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "pending-length",
+              "signature": "len(self._pending)",
+              "relation": "return",
+              "input": "当前待处理字典",
+              "output": "int条数，与_capacity比较",
+              "why": "只对新键检查容量。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 31,
+                  "quote": "        if len(self._pending) >= self._capacity:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "capacity-stop",
+              "signature": "OverflowError(str)，由NoteQueue.enqueue抛出",
+              "relation": "stop",
+              "input": "当前条数已经达到容量",
+              "output": "写入前抛异常，不插入新键",
+              "why": "本例不自动淘汰旧任务。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 32,
+                  "quote": "            raise OverflowError(\"pending queue is full\")",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "store",
+          "title": "写入规范化任务并报告成功",
+          "actor": "队列入口：NoteQueue.enqueue",
+          "action": "创建任务字典，text.strip() 得到存储正文；赋给 _pending[key]，然后 return True。",
+          "input": "key=\"a\"；text=\" First \"；_pending={}",
+          "output": "_pending={\"a\": {\"key\": \"a\", \"text\": \"First\"}}；返回 bool True",
+          "why": "统一键与正文保存形式；前面的拒绝条件都通过后才改变状态。",
+          "concept_ids": [
+            "note-inputs",
+            "note-dedup"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 33,
+              "quote": "        self._pending[key] = {\"key\": key, \"text\": text.strip()}",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            },
+            {
+              "path": "project/job_queue.py",
+              "line": 34,
+              "quote": "        return True",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "stored-strip",
+              "signature": "str.strip()",
+              "relation": "return",
+              "input": "已通过检查的原始正文",
+              "output": "保存时去两端空白后的正文",
+              "why": "这次结果会写入任务字典。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 33,
+                  "quote": "        self._pending[key] = {\"key\": key, \"text\": text.strip()}",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "enqueue-return",
+              "signature": "NoteQueue.enqueue(raw_key: str, text: str) -> bool",
+              "relation": "return",
+              "input": "任务字典已写入_pending",
+              "output": "bool True交还调用者",
+              "why": "只有全部前置条件通过才改变状态。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 34,
+                  "quote": "        return True",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "read",
+          "title": "调用者读取副本核对结果",
+          "actor": "调用者 → NoteQueue.snapshot",
+          "action": "enqueue 已返回后，示例调用者再直接调用 snapshot；列表推导式创建新列表，dict(job) 复制每个任务字典。",
+          "input": "当前 _pending={\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+          "output": "[{\"key\": \"a\", \"text\": \"First\"}]，list[dict[str, str]]",
+          "why": "这个读取是调用者的下一次方法调用，enqueue 本身不调用 snapshot；副本避免外部修改内部任务。",
+          "concept_ids": [
+            "note-snapshot"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 43,
+              "quote": "        return [dict(job) for job in self._pending.values()]",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "snapshot-enter",
+              "signature": "NoteQueue.snapshot() -> list[dict[str,str]]",
+              "relation": "call",
+              "input": "调用者另发起读取；enqueue已返回",
+              "output": "开始构造新列表",
+              "why": "snapshot不是enqueue内部调用。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 42,
+                  "quote": "    def snapshot(self) -> list[dict[str, str]]:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "pending-values",
+              "signature": "dict.values()",
+              "relation": "return",
+              "input": "当前_pending",
+              "output": "按插入顺序的任务值视图",
+              "why": "视图供列表推导式读取，不返回给外部。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 43,
+                  "quote": "        return [dict(job) for job in self._pending.values()]",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "job-copy",
+              "signature": "dict(job)",
+              "relation": "return",
+              "input": "每条任务字典",
+              "output": "新任务字典；字符串值可共享",
+              "why": "逐个复制元素容器；不保证嵌套可变对象隔离。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 43,
+                  "quote": "        return [dict(job) for job in self._pending.values()]",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "snapshot-return",
+              "signature": "NoteQueue.snapshot() -> list[dict[str,str]]",
+              "relation": "return",
+              "input": "新列表内装新字典",
+              "output": "副本列表交还调用者",
+              "why": "读取不删除待处理任务。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 43,
+                  "quote": "        return [dict(job) for job in self._pending.values()]",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "branches": [
+        {
+          "from_step_id": "normalize",
+          "condition": "raw_key=42 或空白键",
+          "outcome": "ValueError；没有局部 key 返回给 enqueue，_pending 保留。",
+          "skipped_step_ids": [
+            "body",
+            "duplicate",
+            "capacity",
+            "store",
+            "read"
+          ]
+        },
+        {
+          "from_step_id": "body",
+          "condition": "text=\" \" 或非字符串",
+          "outcome": "ValueError；非法重复也在去重之前停止。",
+          "skipped_step_ids": [
+            "duplicate",
+            "capacity",
+            "store",
+            "read"
+          ]
+        },
+        {
+          "from_step_id": "duplicate",
+          "condition": "key=\"a\" 已在 _pending",
+          "outcome": "return False；旧正文不覆盖，不检查容量。",
+          "skipped_step_ids": [
+            "capacity",
+            "store",
+            "read"
+          ]
+        },
+        {
+          "from_step_id": "capacity",
+          "condition": "len(_pending)=1，_capacity=1，key=b 是新键",
+          "outcome": "OverflowError；旧任务保留，新任务未写入。",
+          "skipped_step_ids": [
+            "store",
+            "read"
+          ]
+        }
+      ],
+      "trace_cases": [
+        {
+          "id": "success",
+          "title": "带空格和大写键首次入队",
+          "input": "NoteQueue(2) 为空；enqueue(\" A \", \" First \") 后调用 snapshot()",
+          "result": "静态预测：True；[{\"key\":\"a\",\"text\":\"First\"}]。未将预测帧当运行记录。",
+          "frames": [
+            {
+              "step_id": "normalize",
+              "explanation": "保留原始值，再进行规范化。 _key 直接返回 a，绑定到 enqueue 的 key。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "enqueue-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "静态方法只处理一个值，不访问队列状态。 _key 直接返回 a，绑定到 enqueue 的 key。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "key-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "整数42必须在字符串方法之前被拒绝。 _key 直接返回 a，绑定到 enqueue 的 key。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "isinstance(raw,str)",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "类型检查返回"
+                }
+              ],
+              "method_id": "key-type"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "先去两端空白，原始字符串没有原地修改。 _key 直接返回 a，绑定到 enqueue 的 key。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "strip_result",
+                  "type": "str",
+                  "value": "'A'",
+                  "source": "str.strip返回"
+                }
+              ],
+              "method_id": "key-strip"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "统一大小写后再作为字典键。 _key 直接返回 a，绑定到 enqueue 的 key。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "normalized",
+                  "type": "str",
+                  "value": "'a'",
+                  "source": "str.casefold返回；尚未回到enqueue赋值"
+                }
+              ],
+              "method_id": "key-casefold"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "调用者只有正常返回后才有新局部key。 _key 直接返回 a，绑定到 enqueue 的 key。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "key",
+                  "type": "str",
+                  "value": "\"a\"",
+                  "source": "_key 返回"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{}",
+                  "source": "构造器为当前实例创建"
+                }
+              ],
+              "method_id": "key-return"
+            },
+            {
+              "step_id": "body",
+              "explanation": "or短路：非文本时不调用strip。 正文有效；检查时不改 text 变量。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\" First \"",
+                  "source": "调用者参数"
+                }
+              ],
+              "method_id": "body-type"
+            },
+            {
+              "step_id": "body",
+              "explanation": "检查与最终存储是两次表达式求值。 正文有效；检查时不改 text 变量。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\" First \"",
+                  "source": "调用者参数"
+                }
+              ],
+              "method_id": "body-strip"
+            },
+            {
+              "step_id": "duplicate",
+              "explanation": "这是字典成员查询，不是数据库访问。 a 不在空字典，未提前返回。",
+              "values": [
+                {
+                  "name": "key in self._pending",
+                  "type": "bool",
+                  "value": "False",
+                  "source": "字典成员检查返回"
+                }
+              ],
+              "method_id": "duplicate-result"
+            },
+            {
+              "step_id": "capacity",
+              "explanation": "只对新键检查容量。 容量检查通过。",
+              "values": [
+                {
+                  "name": "len(self._pending)",
+                  "type": "int",
+                  "value": "0",
+                  "source": "当前待处理条数"
+                },
+                {
+                  "name": "self._capacity",
+                  "type": "int",
+                  "value": "2",
+                  "source": "构造器参数"
+                }
+              ],
+              "method_id": "pending-length"
+            },
+            {
+              "step_id": "store",
+              "explanation": "这次结果会写入任务字典。 写入 a，正文去两端空格，返回 True。",
+              "values": [
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+                  "source": "enqueue 赋值"
+                },
+                {
+                  "name": "return",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "enqueue 返回"
+                }
+              ],
+              "method_id": "stored-strip"
+            },
+            {
+              "step_id": "store",
+              "explanation": "只有全部前置条件通过才改变状态。 写入 a，正文去两端空格，返回 True。",
+              "values": [
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+                  "source": "enqueue 赋值"
+                },
+                {
+                  "name": "return",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "enqueue 返回"
+                }
+              ],
+              "method_id": "enqueue-return"
+            },
+            {
+              "step_id": "read",
+              "explanation": "snapshot不是enqueue内部调用。 调用者再读 snapshot，元素是任务副本。",
+              "values": [
+                {
+                  "name": "self._pending",
+                  "type": "dict[str,dict[str,str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+                  "source": "调用snapshot之前的内部状态"
+                }
+              ],
+              "method_id": "snapshot-enter"
+            },
+            {
+              "step_id": "read",
+              "explanation": "视图供列表推导式读取，不返回给外部。 调用者再读 snapshot，元素是任务副本。",
+              "values": [
+                {
+                  "name": "jobs_view",
+                  "type": "dict_values",
+                  "value": "[{\"key\":\"a\",\"text\":\"First\"}]",
+                  "source": "_pending.values返回的任务值视图，尚未复制"
+                }
+              ],
+              "method_id": "pending-values"
+            },
+            {
+              "step_id": "read",
+              "explanation": "逐个复制元素容器；不保证嵌套可变对象隔离。 调用者再读 snapshot，元素是任务副本。",
+              "values": [
+                {
+                  "name": "job_copy",
+                  "type": "dict[str,str]",
+                  "value": "{\"key\": \"a\", \"text\": \"First\"}",
+                  "source": "dict(job)为第一条任务新建的字典；其他任务也逐个复制"
+                }
+              ],
+              "method_id": "job-copy"
+            },
+            {
+              "step_id": "read",
+              "explanation": "读取不删除待处理任务。 调用者再读 snapshot，元素是任务副本。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "list[dict[str, str]]",
+                  "value": "[{\"key\":\"a\",\"text\":\"First\"}]",
+                  "source": "snapshot 返回"
+                }
+              ],
+              "method_id": "snapshot-return"
+            }
+          ]
+        },
+        {
+          "id": "duplicate-full",
+          "title": "满队列中的有效重复",
+          "input": "NoteQueue(1) 已存 a/First；enqueue(\" A \", \"Replacement\")",
+          "result": "静态预测：False，a 的正文仍为 First；容量检查未执行。",
+          "frames": [
+            {
+              "step_id": "normalize",
+              "explanation": "保留原始值，再进行规范化。 原始键统一为 a。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "enqueue-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "静态方法只处理一个值，不访问队列状态。 原始键统一为 a。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "key-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "整数42必须在字符串方法之前被拒绝。 原始键统一为 a。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "isinstance(raw,str)",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "类型检查返回"
+                }
+              ],
+              "method_id": "key-type"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "先去两端空白，原始字符串没有原地修改。 原始键统一为 a。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "strip_result",
+                  "type": "str",
+                  "value": "'A'",
+                  "source": "str.strip返回"
+                }
+              ],
+              "method_id": "key-strip"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "统一大小写后再作为字典键。 原始键统一为 a。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" A \"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "normalized",
+                  "type": "str",
+                  "value": "'a'",
+                  "source": "str.casefold返回；尚未回到enqueue赋值"
+                }
+              ],
+              "method_id": "key-casefold"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "调用者只有正常返回后才有新局部key。 原始键统一为 a。",
+              "values": [
+                {
+                  "name": "key",
+                  "type": "str",
+                  "value": "\"a\"",
+                  "source": "_key 返回"
+                }
+              ],
+              "method_id": "key-return"
+            },
+            {
+              "step_id": "body",
+              "explanation": "or短路：非文本时不调用strip。 Replacement 非空，先通过输入检查。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\"Replacement\"",
+                  "source": "调用者参数"
+                }
+              ],
+              "method_id": "body-type"
+            },
+            {
+              "step_id": "body",
+              "explanation": "检查与最终存储是两次表达式求值。 Replacement 非空，先通过输入检查。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\"Replacement\"",
+                  "source": "调用者参数"
+                }
+              ],
+              "method_id": "body-strip"
+            },
+            {
+              "step_id": "duplicate",
+              "explanation": "这是字典成员查询，不是数据库访问。 字典中有 a，直接 False，不覆盖旧值。",
+              "values": [
+                {
+                  "name": "key in self._pending",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "字典成员检查返回"
+                }
+              ],
+              "method_id": "duplicate-result"
+            },
+            {
+              "step_id": "duplicate",
+              "explanation": "有效重复与非法输入是不同结果。 字典中有 a，直接 False，不覆盖旧值。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "bool",
+                  "value": "False",
+                  "source": "去重分支"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+                  "source": "原有状态保留"
+                }
+              ],
+              "method_id": "duplicate-return"
+            }
+          ],
+          "skipped_step_ids": [
+            "capacity",
+            "store",
+            "read"
+          ]
+        },
+        {
+          "id": "invalid-key",
+          "title": "类型提示挡不住整数键",
+          "input": "NoteQueue(2) 为空；enqueue(42, \"Note\")",
+          "result": "静态预测：ValueError(key must be text)；_pending 仍为空。",
+          "frames": [
+            {
+              "step_id": "normalize",
+              "explanation": "保留原始值，再进行规范化。 isinstance(42, str) 为 False，_key 抛异常，key 还未绑定。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "int",
+                  "value": "42",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "enqueue-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "静态方法只处理一个值，不访问队列状态。 isinstance(42, str) 为 False，_key 抛异常，key 还未绑定。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "int",
+                  "value": "42",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "key-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "整数42必须在字符串方法之前被拒绝。 isinstance(42, str) 为 False，_key 抛异常，key 还未绑定。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "int",
+                  "value": "42",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "isinstance(raw,str)",
+                  "type": "bool",
+                  "value": "False",
+                  "source": "类型检查返回"
+                }
+              ],
+              "method_id": "key-type"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "原代码不自动转字符串或吞掉异常。 isinstance(42, str) 为 False，_key 抛异常，key 还未绑定。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "int",
+                  "value": "42",
+                  "source": "调用者实际参数"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{}",
+                  "source": "构造器为当前实例创建"
+                }
+              ],
+              "method_id": "key-stop"
+            }
+          ],
+          "skipped_step_ids": [
+            "body",
+            "duplicate",
+            "capacity",
+            "store",
+            "read"
+          ]
+        },
+        {
+          "id": "invalid-duplicate-body",
+          "title": "重复键配空正文仍然非法",
+          "input": "NoteQueue(1) 已存 a/First；enqueue(\"a\", \" \")",
+          "result": "静态预测：ValueError(text must not be blank)，旧任务不变；不是 False。",
+          "frames": [
+            {
+              "step_id": "normalize",
+              "explanation": "保留原始值，再进行规范化。 键 a 有效。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"a\"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "enqueue-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "静态方法只处理一个值，不访问队列状态。 键 a 有效。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"a\"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "key-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "整数42必须在字符串方法之前被拒绝。 键 a 有效。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"a\"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "isinstance(raw,str)",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "类型检查返回"
+                }
+              ],
+              "method_id": "key-type"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "先去两端空白，原始字符串没有原地修改。 键 a 有效。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"a\"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "strip_result",
+                  "type": "str",
+                  "value": "'a'",
+                  "source": "str.strip返回"
+                }
+              ],
+              "method_id": "key-strip"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "统一大小写后再作为字典键。 键 a 有效。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"a\"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "normalized",
+                  "type": "str",
+                  "value": "'a'",
+                  "source": "str.casefold返回；尚未回到enqueue赋值"
+                }
+              ],
+              "method_id": "key-casefold"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "调用者只有正常返回后才有新局部key。 键 a 有效。",
+              "values": [
+                {
+                  "name": "key",
+                  "type": "str",
+                  "value": "\"a\"",
+                  "source": "_key 返回"
+                }
+              ],
+              "method_id": "key-return"
+            },
+            {
+              "step_id": "body",
+              "explanation": "or短路：非文本时不调用strip。 strip 得到空字符串；正文检查提前抛异常。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\" \"",
+                  "source": "参数"
+                },
+                {
+                  "name": "text.strip()",
+                  "type": "str",
+                  "value": "\"\"",
+                  "source": "表达式结果"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+                  "source": "原有状态保留"
+                }
+              ],
+              "method_id": "body-type"
+            },
+            {
+              "step_id": "body",
+              "explanation": "检查与最终存储是两次表达式求值。 strip 得到空字符串；正文检查提前抛异常。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\" \"",
+                  "source": "参数"
+                },
+                {
+                  "name": "text.strip()",
+                  "type": "str",
+                  "value": "\"\"",
+                  "source": "表达式结果"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+                  "source": "原有状态保留"
+                }
+              ],
+              "method_id": "body-strip"
+            },
+            {
+              "step_id": "body",
+              "explanation": "非法重复请求也要先拒绝。 strip 得到空字符串；正文检查提前抛异常。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\" \"",
+                  "source": "参数"
+                },
+                {
+                  "name": "text.strip()",
+                  "type": "str",
+                  "value": "\"\"",
+                  "source": "表达式结果"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+                  "source": "原有状态保留"
+                }
+              ],
+              "method_id": "body-stop"
+            }
+          ],
+          "skipped_step_ids": [
+            "duplicate",
+            "capacity",
+            "store",
+            "read"
+          ]
+        },
+        {
+          "id": "new-key-full",
+          "title": "容量已满时拒绝新键",
+          "input": "NoteQueue(1) 已存 a/First；enqueue(\"b\", \"New\")",
+          "result": "静态预测：OverflowError(pending queue is full)，未写入 b。",
+          "frames": [
+            {
+              "step_id": "normalize",
+              "explanation": "保留原始值，再进行规范化。 合法键得到 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"b\"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "enqueue-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "静态方法只处理一个值，不访问队列状态。 合法键得到 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"b\"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "key-enter"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "整数42必须在字符串方法之前被拒绝。 合法键得到 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"b\"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "isinstance(raw,str)",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "类型检查返回"
+                }
+              ],
+              "method_id": "key-type"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "先去两端空白，原始字符串没有原地修改。 合法键得到 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"b\"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "strip_result",
+                  "type": "str",
+                  "value": "'b'",
+                  "source": "str.strip返回"
+                }
+              ],
+              "method_id": "key-strip"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "统一大小写后再作为字典键。 合法键得到 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\"b\"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "normalized",
+                  "type": "str",
+                  "value": "'b'",
+                  "source": "str.casefold返回；尚未回到enqueue赋值"
+                }
+              ],
+              "method_id": "key-casefold"
+            },
+            {
+              "step_id": "normalize",
+              "explanation": "调用者只有正常返回后才有新局部key。 合法键得到 b。",
+              "values": [
+                {
+                  "name": "key",
+                  "type": "str",
+                  "value": "\"b\"",
+                  "source": "_key 返回"
+                }
+              ],
+              "method_id": "key-return"
+            },
+            {
+              "step_id": "body",
+              "explanation": "or短路：非文本时不调用strip。 New 有效。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\"New\"",
+                  "source": "参数"
+                }
+              ],
+              "method_id": "body-type"
+            },
+            {
+              "step_id": "body",
+              "explanation": "检查与最终存储是两次表达式求值。 New 有效。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\"New\"",
+                  "source": "参数"
+                }
+              ],
+              "method_id": "body-strip"
+            },
+            {
+              "step_id": "duplicate",
+              "explanation": "这是字典成员查询，不是数据库访问。 b 不是现有待处理键。",
+              "values": [
+                {
+                  "name": "key in self._pending",
+                  "type": "bool",
+                  "value": "False",
+                  "source": "字典成员检查返回"
+                }
+              ],
+              "method_id": "duplicate-result"
+            },
+            {
+              "step_id": "capacity",
+              "explanation": "只对新键检查容量。 1 >= 1 成立，在写入前异常。",
+              "values": [
+                {
+                  "name": "len(self._pending)",
+                  "type": "int",
+                  "value": "1",
+                  "source": "当前条数"
+                },
+                {
+                  "name": "self._capacity",
+                  "type": "int",
+                  "value": "1",
+                  "source": "构造器"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+                  "source": "旧任务保留"
+                }
+              ],
+              "method_id": "pending-length"
+            },
+            {
+              "step_id": "capacity",
+              "explanation": "本例不自动淘汰旧任务。 1 >= 1 成立，在写入前异常。",
+              "values": [
+                {
+                  "name": "len(self._pending)",
+                  "type": "int",
+                  "value": "1",
+                  "source": "当前条数"
+                },
+                {
+                  "name": "self._capacity",
+                  "type": "int",
+                  "value": "1",
+                  "source": "构造器"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"First\"}}",
+                  "source": "旧任务保留"
+                }
+              ],
+              "method_id": "capacity-stop"
+            }
+          ],
+          "skipped_step_ids": [
+            "store",
+            "read"
+          ]
+        }
+      ],
+      "resources": [
+        {
+          "name": "当前 NoteQueue 的 _pending 与 _capacity",
+          "ownership": "构造器对每个 self 单独创建字典；容量属于同一实例。这里没有线程、数据库或网络连接。",
+          "lifecycle": "队列创建时为空；enqueue 写入任务，take 用 pop 移除，实例不再被引用时可回收。没有持久化。",
+          "failure": "输入或容量异常发生在写入前，既有任务保留；取出后没有处理中集合，工作者失败时无法靠本例恢复任务。"
+        }
+      ]
+    },
+    {
+      "id": "note-take-requeue",
+      "title": "取出并再次入队",
+      "summary": "沿 take 返回到调用者，再进入 enqueue；这两个方法之间是调用者安排的顺序。以下是源码预测，没有工作者或可靠处理保证。",
+      "scenario": "先复习最早加入的笔记，随后以同一个键提交新版笔记，观察去重范围和容量释放。",
+      "input": "NoteQueue(2) 先存 b/First、a/Second；依次 take()、enqueue(\" B \", \"Again\")、snapshot()。",
+      "expected": "取 b/First；重新入队 True；快照为 a/Second、b/Again。空队列 take 则 None。",
+      "steps": [
+        {
+          "id": "empty",
+          "title": "先确认有没有任务可取",
+          "actor": "队列入口：NoteQueue.take",
+          "action": "检查 _pending 是否为空；为空直接 return None。",
+          "input": "按 b、a 顺序已有两个任务",
+          "output": "非空则继续；空则 None",
+          "why": "避免对空迭代器 next 触发 StopIteration。",
+          "concept_ids": [
+            "note-lifecycle"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 37,
+              "quote": "        if not self._pending:",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "take-enter",
+              "signature": "NoteQueue.take() -> dict[str,str] | None",
+              "relation": "call",
+              "input": "此刻_pending状态",
+              "output": "先判断是否为空",
+              "why": "空检查安排在next之前。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 36,
+                  "quote": "    def take(self) -> dict[str, str] | None:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "empty-return",
+              "signature": "NoteQueue.take() -> dict[str,str] | None",
+              "relation": "stop",
+              "input": "空队列",
+              "output": "None提前返回，iter/next/pop均未调用",
+              "why": "正常无任务，不是异常或工作完成。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 37,
+                  "quote": "        if not self._pending:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "oldest",
+          "title": "找到最早进入的任务键",
+          "actor": "队列入口：NoteQueue.take",
+          "action": "iter 字典得到按插入顺序的键迭代器，next 取第一个。",
+          "input": "当前键顺序 b → a",
+          "output": "oldest_key=\"b\"，str",
+          "why": "FIFO 按插入顺序，不按字母排序。",
+          "concept_ids": [
+            "note-lifecycle"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 39,
+              "quote": "        oldest_key = next(iter(self._pending))",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "key-iterator",
+              "signature": "iter(self._pending)",
+              "relation": "return",
+              "input": "非空待处理字典",
+              "output": "按插入顺序遍历键的迭代器",
+              "why": "顺序是加入时间，不是字母排序。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 39,
+                  "quote": "        oldest_key = next(iter(self._pending))",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "first-key",
+              "signature": "next(iterator)",
+              "relation": "return",
+              "input": "上一步的键迭代器",
+              "output": "首个键绑定oldest_key",
+              "why": "先判断非空以免StopIteration。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 39,
+                  "quote": "        oldest_key = next(iter(self._pending))",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "remove",
+          "title": "删除它，返回任务副本",
+          "actor": "队列入口：NoteQueue.take",
+          "action": "pop 移除 b 并返回任务，dict 再建副本，take 返回。",
+          "input": "oldest_key=\"b\"",
+          "output": "返回 {\"key\":\"b\",\"text\":\"First\"}；内部只剩 a",
+          "why": "取出释放键和容量，尚未说明任务业务处理是否成功。",
+          "concept_ids": [
+            "note-lifecycle",
+            "note-snapshot"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 40,
+              "quote": "        return dict(self._pending.pop(oldest_key))",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "pending-pop",
+              "signature": "dict.pop(oldest_key)",
+              "relation": "return",
+              "input": "当前首键",
+              "output": "删除该键并返回内部任务字典",
+              "why": "这一步已经释放键与一个容量。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 40,
+                  "quote": "        return dict(self._pending.pop(oldest_key))",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "taken-copy",
+              "signature": "dict(job)",
+              "relation": "return",
+              "input": "pop刚返回的任务字典",
+              "output": "为外部新建一份字典副本",
+              "why": "复制发生在删除之后；没有处理中存储。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 40,
+                  "quote": "        return dict(self._pending.pop(oldest_key))",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "take-return",
+              "signature": "NoteQueue.take() -> dict[str,str] | None",
+              "relation": "return",
+              "input": "新任务字典副本",
+              "output": "交还调用者，内部已无该键",
+              "why": "取出不是成功确认，工作者未在此实现。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 40,
+                  "quote": "        return dict(self._pending.pop(oldest_key))",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "re-normalize",
+          "title": "先把任务键统一成内部标识",
+          "actor": "队列入口：NoteQueue.enqueue → NoteQueue._key",
+          "action": "enqueue 直接调用 self._key(raw_key)。_key 检查 str，依次 strip、casefold，再拒绝空键并返回。",
+          "input": "take 已返回，调用者再 enqueue(\" B \", \"Again\")；内部只有 a",
+          "output": "key=\"b\"，str",
+          "why": "相同含义的键先统一，再谈去重；类型提示不会自动校验调用输入。",
+          "concept_ids": [
+            "note-inputs"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 26,
+              "quote": "        key = self._key(raw_key)",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            },
+            {
+              "path": "project/job_queue.py",
+              "line": 18,
+              "quote": "        if not isinstance(raw, str):",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            },
+            {
+              "path": "project/job_queue.py",
+              "line": 20,
+              "quote": "        normalized = raw.strip().casefold()",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "enqueue-enter",
+              "signature": "NoteQueue.enqueue(raw_key: str, text: str) -> bool",
+              "relation": "call",
+              "input": "调用者原始key与正文；注解不是自动校验",
+              "output": "进入后第一句调用_key",
+              "why": "保留原始值，再进行规范化。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 25,
+                  "quote": "    def enqueue(self, raw_key: str, text: str) -> bool:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-enter",
+              "signature": "NoteQueue._key(raw: str) -> str",
+              "relation": "call",
+              "input": "raw是同一原始键",
+              "output": "先检查实际运行时类型",
+              "why": "静态方法只处理一个值，不访问队列状态。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 17,
+                  "quote": "    def _key(raw: str) -> str:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-type",
+              "signature": "isinstance(raw, str)",
+              "relation": "return",
+              "input": "raw真实对象",
+              "output": "bool：是否字符串",
+              "why": "整数42必须在字符串方法之前被拒绝。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 18,
+                  "quote": "        if not isinstance(raw, str):",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-strip",
+              "signature": "str.strip()",
+              "relation": "return",
+              "input": "原始键例如\" A \"",
+              "output": "中间结果\"A\"",
+              "why": "先去两端空白，原始字符串没有原地修改。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 20,
+                  "quote": "        normalized = raw.strip().casefold()",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-casefold",
+              "signature": "str.casefold()",
+              "relation": "return",
+              "input": "strip结果例如\"A\"",
+              "output": "normalized=\"a\"",
+              "why": "统一大小写后再作为字典键。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 20,
+                  "quote": "        normalized = raw.strip().casefold()",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-return",
+              "signature": "NoteQueue._key(raw: str) -> str",
+              "relation": "return",
+              "input": "规范化非空文本",
+              "output": "返回str，enqueue局部key随后完成绑定",
+              "why": "调用者只有正常返回后才有新局部key。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 23,
+                  "quote": "        return normalized",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "key-stop",
+              "signature": "ValueError(str)，由NoteQueue._key抛出",
+              "relation": "stop",
+              "input": "非文本或规范化为空",
+              "output": "异常传播到enqueue，未进入正文校验或写入",
+              "why": "原代码不自动转字符串或吞掉异常。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 19,
+                  "quote": "            raise ValueError(\"key must be text\")",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "re-body",
+          "title": "正文是否合法，先在这里决定",
+          "actor": "队列入口：NoteQueue.enqueue",
+          "action": "检查正文类型与 strip 后是否为空。非法则 raise ValueError，后续不执行。",
+          "input": "text=\"Again\"，str；key=\"b\"",
+          "output": "有效正文继续；当前 text 仍是原字符串，存储时才 strip",
+          "why": "重复请求也应满足输入约束，不能先去重而跳过非法正文。",
+          "concept_ids": [
+            "note-inputs",
+            "note-dedup"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 27,
+              "quote": "        if not isinstance(text, str) or not text.strip():",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "body-type",
+              "signature": "isinstance(text, str)",
+              "relation": "return",
+              "input": "原始正文对象",
+              "output": "bool：是否str",
+              "why": "or短路：非文本时不调用strip。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 27,
+                  "quote": "        if not isinstance(text, str) or not text.strip():",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "body-strip",
+              "signature": "str.strip()",
+              "relation": "return",
+              "input": "已确认是字符串的text",
+              "output": "仅用于空白检查的str；text局部仍保存原值",
+              "why": "检查与最终存储是两次表达式求值。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 27,
+                  "quote": "        if not isinstance(text, str) or not text.strip():",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "body-stop",
+              "signature": "ValueError(str)，由NoteQueue.enqueue抛出",
+              "relation": "stop",
+              "input": "非字符串或仅空白正文",
+              "output": "异常，去重与容量未执行；状态保留",
+              "why": "非法重复请求也要先拒绝。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 28,
+                  "quote": "            raise ValueError(\"text must not be blank\")",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "re-duplicate",
+          "title": "查看此键是否已经在等待",
+          "actor": "队列入口：NoteQueue.enqueue",
+          "action": "在当前 _pending 字典查 key；存在就直接 return False，保留旧任务。",
+          "input": "key=\"b\"；内部只有 a",
+          "output": "本次不存在，继续；存在时返回 bool False",
+          "why": "去重只覆盖待处理键；满队列中的有效重复仍得到 False。",
+          "concept_ids": [
+            "note-dedup"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 29,
+              "quote": "        if key in self._pending:",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "duplicate-result",
+              "signature": "dict.__contains__(key)（in 成员检查）",
+              "relation": "return",
+              "input": "key与当前_pending",
+              "output": "bool：键是否正在待处理",
+              "why": "这是字典成员查询，不是数据库访问。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 29,
+                  "quote": "        if key in self._pending:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "duplicate-return",
+              "signature": "NoteQueue.enqueue(raw_key: str, text: str) -> bool",
+              "relation": "stop",
+              "input": "key确实已在_pending",
+              "output": "提前False；不检查容量，不覆盖旧正文",
+              "why": "有效重复与非法输入是不同结果。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 30,
+                  "quote": "            return False",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "re-capacity",
+          "title": "新任务还放得下吗",
+          "actor": "队列入口：NoteQueue.enqueue",
+          "action": "比较 len(_pending) 与 _capacity；已满则 raise OverflowError。只有新键能走到这里。",
+          "input": "len(_pending)=1，_capacity=2",
+          "output": "1 >= 2 为 False，继续写入",
+          "why": "在写入之前约束容量，异常不会插入一半任务。",
+          "concept_ids": [
+            "note-dedup"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 31,
+              "quote": "        if len(self._pending) >= self._capacity:",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            },
+            {
+              "path": "project/job_queue.py",
+              "line": 32,
+              "quote": "            raise OverflowError(\"pending queue is full\")",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "pending-length",
+              "signature": "len(self._pending)",
+              "relation": "return",
+              "input": "当前待处理字典",
+              "output": "int条数，与_capacity比较",
+              "why": "只对新键检查容量。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 31,
+                  "quote": "        if len(self._pending) >= self._capacity:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "capacity-stop",
+              "signature": "OverflowError(str)，由NoteQueue.enqueue抛出",
+              "relation": "stop",
+              "input": "当前条数已经达到容量",
+              "output": "写入前抛异常，不插入新键",
+              "why": "本例不自动淘汰旧任务。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 32,
+                  "quote": "            raise OverflowError(\"pending queue is full\")",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "re-store",
+          "title": "写入规范化任务并报告成功",
+          "actor": "队列入口：NoteQueue.enqueue",
+          "action": "创建任务字典，text.strip() 得到存储正文；赋给 _pending[key]，然后 return True。",
+          "input": "key=\"b\"；text=\"Again\"；内部已有 a/Second",
+          "output": "内部键顺序 a → b；返回 bool True",
+          "why": "统一键与正文保存形式；前面的拒绝条件都通过后才改变状态。",
+          "concept_ids": [
+            "note-inputs",
+            "note-dedup"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 33,
+              "quote": "        self._pending[key] = {\"key\": key, \"text\": text.strip()}",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            },
+            {
+              "path": "project/job_queue.py",
+              "line": 34,
+              "quote": "        return True",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "stored-strip",
+              "signature": "str.strip()",
+              "relation": "return",
+              "input": "已通过检查的原始正文",
+              "output": "保存时去两端空白后的正文",
+              "why": "这次结果会写入任务字典。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 33,
+                  "quote": "        self._pending[key] = {\"key\": key, \"text\": text.strip()}",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "enqueue-return",
+              "signature": "NoteQueue.enqueue(raw_key: str, text: str) -> bool",
+              "relation": "return",
+              "input": "任务字典已写入_pending",
+              "output": "bool True交还调用者",
+              "why": "只有全部前置条件通过才改变状态。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 34,
+                  "quote": "        return True",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "snapshot",
+          "title": "再看新的待处理顺序",
+          "actor": "调用者 → NoteQueue.snapshot",
+          "action": "第二次 enqueue 返回后，调用者再取 snapshot；新 b 排到 a 后。",
+          "input": "键顺序 a → b",
+          "output": "[{\"key\":\"a\",\"text\":\"Second\"},{\"key\":\"b\",\"text\":\"Again\"}]",
+          "why": "观察的是当前待处理队列，不含已取出任务或处理历史。",
+          "concept_ids": [
+            "note-lifecycle",
+            "note-snapshot"
+          ],
+          "evidence": [
+            {
+              "path": "project/job_queue.py",
+              "line": 43,
+              "quote": "        return [dict(job) for job in self._pending.values()]",
+              "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+            }
+          ],
+          "methods": [
+            {
+              "id": "snapshot-enter",
+              "signature": "NoteQueue.snapshot() -> list[dict[str,str]]",
+              "relation": "call",
+              "input": "调用者另发起读取；enqueue已返回",
+              "output": "开始构造新列表",
+              "why": "snapshot不是enqueue内部调用。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 42,
+                  "quote": "    def snapshot(self) -> list[dict[str, str]]:",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "pending-values",
+              "signature": "dict.values()",
+              "relation": "return",
+              "input": "当前_pending",
+              "output": "按插入顺序的任务值视图",
+              "why": "视图供列表推导式读取，不返回给外部。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 43,
+                  "quote": "        return [dict(job) for job in self._pending.values()]",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "job-copy",
+              "signature": "dict(job)",
+              "relation": "return",
+              "input": "每条任务字典",
+              "output": "新任务字典；字符串值可共享",
+              "why": "逐个复制元素容器；不保证嵌套可变对象隔离。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 43,
+                  "quote": "        return [dict(job) for job in self._pending.values()]",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            },
+            {
+              "id": "snapshot-return",
+              "signature": "NoteQueue.snapshot() -> list[dict[str,str]]",
+              "relation": "return",
+              "input": "新列表内装新字典",
+              "output": "副本列表交还调用者",
+              "why": "读取不删除待处理任务。",
+              "evidence": [
+                {
+                  "path": "project/job_queue.py",
+                  "line": 43,
+                  "quote": "        return [dict(job) for job in self._pending.values()]",
+                  "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "branches": [
+        {
+          "from_step_id": "empty",
+          "condition": "_pending={}",
+          "outcome": "take 返回 None；本案例调用者在此结束，不调用 enqueue。",
+          "skipped_step_ids": [
+            "oldest",
+            "remove",
+            "re-normalize",
+            "re-body",
+            "re-duplicate",
+            "re-capacity",
+            "re-store",
+            "snapshot"
+          ]
+        }
+      ],
+      "trace_cases": [
+        {
+          "id": "release-requeue",
+          "title": "满队列取出后，同键在末尾重入",
+          "input": "容量2，内部按 b/First → a/Second；take 后 enqueue(\" B \",\"Again\") 后 snapshot。",
+          "result": "静态预测：take 返回 b/First，enqueue 返回 True，快照键序 [\"a\",\"b\"]。",
+          "frames": [
+            {
+              "step_id": "empty",
+              "explanation": "空检查安排在next之前。 非空，继续。",
+              "values": [
+                {
+                  "name": "self._pending",
+                  "type": "dict[str,dict[str,str]]",
+                  "value": "{\"b\":{\"key\":\"b\",\"text\":\"First\"},\"a\":{\"key\":\"a\",\"text\":\"Second\"}}",
+                  "source": "进入take前已给定的实例状态"
+                }
+              ],
+              "method_id": "take-enter"
+            },
+            {
+              "step_id": "oldest",
+              "explanation": "顺序是加入时间，不是字母排序。 按插入顺序取 b。",
+              "values": [
+                {
+                  "name": "oldest_key",
+                  "type": "str",
+                  "value": "\"b\"",
+                  "source": "next(iter(_pending))"
+                }
+              ],
+              "method_id": "key-iterator"
+            },
+            {
+              "step_id": "oldest",
+              "explanation": "先判断非空以免StopIteration。 按插入顺序取 b。",
+              "values": [
+                {
+                  "name": "oldest_key",
+                  "type": "str",
+                  "value": "\"b\"",
+                  "source": "next(iter(_pending))"
+                }
+              ],
+              "method_id": "first-key"
+            },
+            {
+              "step_id": "remove",
+              "explanation": "这一步已经释放键与一个容量。 pop 删除 b；返回的是该任务的副本。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "dict[str, str]",
+                  "value": "{\"key\":\"b\",\"text\":\"First\"}",
+                  "source": "take 返回"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\":{\"key\":\"a\",\"text\":\"Second\"}}",
+                  "source": "pop 后状态"
+                }
+              ],
+              "method_id": "pending-pop"
+            },
+            {
+              "step_id": "remove",
+              "explanation": "复制发生在删除之后；没有处理中存储。 pop 删除 b；返回的是该任务的副本。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "dict[str, str]",
+                  "value": "{\"key\":\"b\",\"text\":\"First\"}",
+                  "source": "take 返回"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\":{\"key\":\"a\",\"text\":\"Second\"}}",
+                  "source": "pop 后状态"
+                }
+              ],
+              "method_id": "taken-copy"
+            },
+            {
+              "step_id": "remove",
+              "explanation": "取出不是成功确认，工作者未在此实现。 pop 删除 b；返回的是该任务的副本。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "dict[str, str]",
+                  "value": "{\"key\":\"b\",\"text\":\"First\"}",
+                  "source": "take 返回"
+                },
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\":{\"key\":\"a\",\"text\":\"Second\"}}",
+                  "source": "pop 后状态"
+                }
+              ],
+              "method_id": "take-return"
+            },
+            {
+              "step_id": "re-normalize",
+              "explanation": "保留原始值，再进行规范化。 take 返回以后，调用者再调用 enqueue；B 变为 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" B \"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "enqueue-enter"
+            },
+            {
+              "step_id": "re-normalize",
+              "explanation": "静态方法只处理一个值，不访问队列状态。 take 返回以后，调用者再调用 enqueue；B 变为 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" B \"",
+                  "source": "本案例入口原始参数"
+                }
+              ],
+              "method_id": "key-enter"
+            },
+            {
+              "step_id": "re-normalize",
+              "explanation": "整数42必须在字符串方法之前被拒绝。 take 返回以后，调用者再调用 enqueue；B 变为 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" B \"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "isinstance(raw,str)",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "类型检查返回"
+                }
+              ],
+              "method_id": "key-type"
+            },
+            {
+              "step_id": "re-normalize",
+              "explanation": "先去两端空白，原始字符串没有原地修改。 take 返回以后，调用者再调用 enqueue；B 变为 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" B \"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "strip_result",
+                  "type": "str",
+                  "value": "'B'",
+                  "source": "str.strip返回"
+                }
+              ],
+              "method_id": "key-strip"
+            },
+            {
+              "step_id": "re-normalize",
+              "explanation": "统一大小写后再作为字典键。 take 返回以后，调用者再调用 enqueue；B 变为 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" B \"",
+                  "source": "本案例入口原始参数"
+                },
+                {
+                  "name": "normalized",
+                  "type": "str",
+                  "value": "'b'",
+                  "source": "str.casefold返回；尚未回到enqueue赋值"
+                }
+              ],
+              "method_id": "key-casefold"
+            },
+            {
+              "step_id": "re-normalize",
+              "explanation": "调用者只有正常返回后才有新局部key。 take 返回以后，调用者再调用 enqueue；B 变为 b。",
+              "values": [
+                {
+                  "name": "raw_key",
+                  "type": "str",
+                  "value": "\" B \"",
+                  "source": "第二次参数"
+                },
+                {
+                  "name": "key",
+                  "type": "str",
+                  "value": "\"b\"",
+                  "source": "_key 返回"
+                }
+              ],
+              "method_id": "key-return"
+            },
+            {
+              "step_id": "re-body",
+              "explanation": "or短路：非文本时不调用strip。 Again 通过正文检查。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\"Again\"",
+                  "source": "第二次参数"
+                }
+              ],
+              "method_id": "body-type"
+            },
+            {
+              "step_id": "re-body",
+              "explanation": "检查与最终存储是两次表达式求值。 Again 通过正文检查。",
+              "values": [
+                {
+                  "name": "text",
+                  "type": "str",
+                  "value": "\"Again\"",
+                  "source": "第二次参数"
+                }
+              ],
+              "method_id": "body-strip"
+            },
+            {
+              "step_id": "re-duplicate",
+              "explanation": "这是字典成员查询，不是数据库访问。 当前只有 a，b 已释放，查键 False。",
+              "values": [
+                {
+                  "name": "key in self._pending",
+                  "type": "bool",
+                  "value": "False",
+                  "source": "字典成员检查返回"
+                }
+              ],
+              "method_id": "duplicate-result"
+            },
+            {
+              "step_id": "re-capacity",
+              "explanation": "只对新键检查容量。 只剩1项，小于容量2。",
+              "values": [
+                {
+                  "name": "len(self._pending)",
+                  "type": "int",
+                  "value": "1",
+                  "source": "pop 后条数"
+                },
+                {
+                  "name": "self._capacity",
+                  "type": "int",
+                  "value": "2",
+                  "source": "构造器"
+                }
+              ],
+              "method_id": "pending-length"
+            },
+            {
+              "step_id": "re-store",
+              "explanation": "这次结果会写入任务字典。 把新 b 插在 a 后，返回 True。",
+              "values": [
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\":{\"key\":\"a\",\"text\":\"Second\"},\"b\":{\"key\":\"b\",\"text\":\"Again\"}}",
+                  "source": "新的字典插入"
+                },
+                {
+                  "name": "return",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "enqueue 返回"
+                }
+              ],
+              "method_id": "stored-strip"
+            },
+            {
+              "step_id": "re-store",
+              "explanation": "只有全部前置条件通过才改变状态。 把新 b 插在 a 后，返回 True。",
+              "values": [
+                {
+                  "name": "self._pending",
+                  "type": "dict[str, dict[str, str]]",
+                  "value": "{\"a\":{\"key\":\"a\",\"text\":\"Second\"},\"b\":{\"key\":\"b\",\"text\":\"Again\"}}",
+                  "source": "新的字典插入"
+                },
+                {
+                  "name": "return",
+                  "type": "bool",
+                  "value": "True",
+                  "source": "enqueue 返回"
+                }
+              ],
+              "method_id": "enqueue-return"
+            },
+            {
+              "step_id": "snapshot",
+              "explanation": "snapshot不是enqueue内部调用。 再次调用读取，保留当前插入序。",
+              "values": [
+                {
+                  "name": "self._pending",
+                  "type": "dict[str,dict[str,str]]",
+                  "value": "{\"a\": {\"key\": \"a\", \"text\": \"Second\"}, \"b\": {\"key\": \"b\", \"text\": \"Again\"}}",
+                  "source": "调用snapshot之前的内部状态"
+                }
+              ],
+              "method_id": "snapshot-enter"
+            },
+            {
+              "step_id": "snapshot",
+              "explanation": "视图供列表推导式读取，不返回给外部。 再次调用读取，保留当前插入序。",
+              "values": [
+                {
+                  "name": "jobs_view",
+                  "type": "dict_values",
+                  "value": "[{\"key\":\"a\",\"text\":\"Second\"},{\"key\":\"b\",\"text\":\"Again\"}]",
+                  "source": "_pending.values返回的任务值视图，尚未复制"
+                }
+              ],
+              "method_id": "pending-values"
+            },
+            {
+              "step_id": "snapshot",
+              "explanation": "逐个复制元素容器；不保证嵌套可变对象隔离。 再次调用读取，保留当前插入序。",
+              "values": [
+                {
+                  "name": "job_copy",
+                  "type": "dict[str,str]",
+                  "value": "{\"key\": \"a\", \"text\": \"Second\"}",
+                  "source": "dict(job)为第一条任务新建的字典；其他任务也逐个复制"
+                }
+              ],
+              "method_id": "job-copy"
+            },
+            {
+              "step_id": "snapshot",
+              "explanation": "读取不删除待处理任务。 再次调用读取，保留当前插入序。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "list[dict[str, str]]",
+                  "value": "[{\"key\":\"a\",\"text\":\"Second\"},{\"key\":\"b\",\"text\":\"Again\"}]",
+                  "source": "snapshot 返回副本"
+                }
+              ],
+              "method_id": "snapshot-return"
+            }
+          ]
+        },
+        {
+          "id": "empty-stop",
+          "title": "没有任务时先停在空判断",
+          "input": "新的 NoteQueue(2)；仅调用 take()。",
+          "result": "静态预测：None；没有 oldest_key，没有执行 pop 或 enqueue。",
+          "frames": [
+            {
+              "step_id": "empty",
+              "explanation": "空检查安排在next之前。 空字典为假，直接 None。这个调用者没有安排再次入队。",
+              "values": [
+                {
+                  "name": "self._pending",
+                  "type": "dict[str,dict[str,str]]",
+                  "value": "{\"b\":{\"key\":\"b\",\"text\":\"First\"},\"a\":{\"key\":\"a\",\"text\":\"Second\"}}",
+                  "source": "进入take前已给定的实例状态"
+                }
+              ],
+              "method_id": "take-enter"
+            }
+          ]
+        }
+      ],
+      "resources": [
+        {
+          "name": "当前 NoteQueue 的 _pending 与 _capacity",
+          "ownership": "构造器对每个 self 单独创建字典；容量属于同一实例。这里没有线程、数据库或网络连接。",
+          "lifecycle": "队列创建时为空；enqueue 写入任务，take 用 pop 移除，实例不再被引用时可回收。没有持久化。",
+          "failure": "输入或容量异常发生在写入前，既有任务保留；取出后没有处理中集合，工作者失败时无法靠本例恢复任务。"
+        },
+        {
+          "name": "take 返回的任务副本与 snapshot 返回副本",
+          "ownership": "调用者拥有返回字典或列表；内部 a/b 任务仍由队列拥有。字符串字段不可变。",
+          "lifecycle": "dict 与列表推导式在读取时创建；本例没有显式 close，引用消失后可回收。",
+          "failure": "修改返回字典不改变内部对应字典；浅拷贝保护仅适用于本例字符串字段，未证明嵌套可变字段隔离。"
+        }
+      ]
+    }
+  ],
+  "project_summary": {
+    "purpose": "这是一个小型笔记复习任务队列：提交笔记时统一任务键、检查正文、阻止当前重复和容量溢出；取出时按入队先后删除一项；读取时给调用者一个隔离副本。它本身没有笔记界面、定时工作者或模型。",
+    "audience": "需要看懂一个项目如何接收输入、改变状态、交还结果的学习者；程序调用者用enqueue提交任务、take取任务、snapshot检查当前状态。",
+    "scenario": "调用者新建容量为2的队列，提交(\" A \",\" First \")，内部保存a/First。再次提交同键不会覆盖；新键遇到满容量会拒绝；取出最早任务后同键可以再提交。",
+    "capabilities": [
+      "创建具有正整数容量的独立实例",
+      "规范化文本键并拒绝非法输入",
+      "对当前待处理键去重与限制容量",
+      "按插入顺序取出并释放任务键",
+      "复制列表和任务字典供外部读取"
+    ],
+    "learning_value": "可以用几个短字符串手算一个完整状态机，同时学习类型提示与真实校验的区别、判断顺序、提前返回与异常、字典插入顺序、对象所有权和浅拷贝边界。项目虽小，已足以练习说明设计取舍；无需先学习某个特定语言框架。",
+    "limitations": "流程帧是依据当前源码的静态预测。开发者可另行运行本示例自己的单元测试，但这里不把帧当执行日志。本例只适用于单线程、单进程内存：无HTTP、数据库、后台线程、ACK、持久化、故障恢复或真实模型。取出就释放键不等于工作完成；浅拷贝只隔离当前字符串字段。选择题通过不等于独立复现。",
+    "evidence": [
+      {
+        "path": "project/job_queue.py",
+        "line": 9,
+        "quote": "class NoteQueue:",
+        "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+      },
+      {
+        "path": "project/job_queue.py",
+        "line": 26,
+        "quote": "        key = self._key(raw_key)",
+        "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+      },
+      {
+        "path": "project/job_queue.py",
+        "line": 43,
+        "quote": "        return [dict(job) for job in self._pending.values()]",
+        "sha256": "9507860c29cbaf4d568d95d3884cd9e200e85196ba6b15c72e0fb927d923dbf8"
+      }
+    ]
+  }
+}

@@ -38,6 +38,42 @@ class PublicPathTests(unittest.TestCase):
         self.assertEqual("unsafe-path", audit.path_issue("docs/../../private.md"))
         self.assertEqual("private-environment-file", audit.path_issue("examples/.env.local"))
 
+    def test_shijie_has_an_exact_app_and_android_allowlist(self):
+        for name in (
+            "apps/shijie/run.py", "apps/shijie/web/offline-store.js",
+            "apps/shijie/.gitignore", "apps/shijie/CONTEXT.md",
+            "apps/shijie/examples/mobile-seed.json",
+            "apps/shijie/examples/java-demo/src/main/java/demo/study/OrderTools.java",
+            "apps/shijie/tests/offline/test_offline.cjs",
+            "apps/shijie/tests/offline/store-contract.test.cjs",
+            "apps/shijie/android/src/io/shijie/learning/MainActivity.java",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNone(audit.path_issue(name))
+        for name in (
+            "apps/other/run.py", "apps/shijie/private.md", "apps/shijie/web/extra.json",
+            "apps/shijie/examples/private-project/source.py",
+            "apps/shijie/examples/java-demo/private-notes.json",
+            "apps/shijie/android/local.properties",
+            "apps/shijie/scripts/verify_upgrade_041.cjs",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual("outside-public-allowlist", audit.path_issue(name))
+
+    def test_nested_shijie_runtime_data_and_signers_are_rejected(self):
+        for name in (
+            "apps/shijie/data/study.json", "apps/shijie/output/results.json",
+            "apps/shijie/android/build/seed.json", "apps/shijie/android/private-signing/password.txt",
+            "apps/shijie/.qa/local.json", "apps/shijie/android/dist/sample.apk",
+        ):
+            with self.subTest(name=name):
+                self.assertEqual("private-or-generated-directory", audit.path_issue(name))
+        self.assertEqual("private-data-or-binary", audit.path_issue("apps/shijie/android/sample.apk"))
+
+    def test_nested_screenshot_is_limited_to_one_level(self):
+        self.assertIsNone(audit.path_issue("apps/shijie/docs/screenshots/example.png"))
+        self.assertIsNotNone(audit.path_issue("apps/shijie/docs/screenshots/private/example.png"))
+
 
 class ContentTests(unittest.TestCase):
     def test_example_tokens_and_environment_variables_are_allowed(self):
@@ -137,6 +173,35 @@ class GitAuditTests(unittest.TestCase):
         child.mkdir()
         with self.assertRaisesRegex(RuntimeError, "independent-repository-required"):
             audit.audit(child, "staged", "public-learner")
+
+    def test_nested_app_staged_audit_rejects_added_runtime_backup(self):
+        self.stage("apps/shijie/run.py", "print('original example')")
+        self.assertEqual("PASS", self.inspect("staged")["status"])
+        self.stage("apps/shijie/data/backup.json", "{}")
+        result = self.inspect("staged")
+        self.assertIn("private-or-generated-directory", {item["category"] for item in result["findings"]})
+
+    def test_working_tree_scans_nested_app_but_skips_known_local_build_outputs(self):
+        source = self.repo / "apps/shijie/web/app.js"
+        source.parent.mkdir(parents=True)
+        source.write_text("safe original source", encoding="utf-8")
+        generated = self.repo / "apps/shijie/android/private-signing/signer.txt"
+        generated.parent.mkdir(parents=True)
+        generated.write_text("sk" + "-" + "x" * 40, encoding="utf-8")
+        result = self.inspect("working-tree")
+        self.assertEqual("PASS", result["status"])
+        self.assertEqual(1, result["files_checked"])
+        source.write_text("sk" + "-" + "x" * 40, encoding="utf-8")
+        result = self.inspect("working-tree")
+        self.assertIn("model-api-key", {item["category"] for item in result["findings"]})
+
+    def test_nested_app_deleted_private_content_is_still_found_in_history(self):
+        self.stage("apps/shijie/web/app.js", "sk" + "-" + "x" * 40)
+        self.command("commit", "-m", "Synthetic nested fixture")
+        self.stage("apps/shijie/web/app.js", "safe now")
+        self.command("commit", "-m", "Replace synthetic fixture")
+        result = self.inspect("history")
+        self.assertIn("model-api-key", {item["category"] for item in result["findings"]})
 
 
 if __name__ == "__main__":

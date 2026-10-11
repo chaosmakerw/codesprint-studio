@@ -26,5 +26,23 @@ __pycache__/
 *.jks
 *.keystore
 *.apk
+*.aab
 .DS_Store
 Thumbs.db
+
+# The optional Shijie app publishes source and original examples only.
+/apps/shijie/data/
+/apps/shijie/backups/
+/apps/shijie/output/
+/apps/shijie/dist/
+/apps/shijie/.qa/
+/apps/shijie/.venv/
+/apps/shijie/.env
+/apps/shijie/.env.*
+/apps/shijie/android/build/
+/apps/shijie/android/dist/
+/apps/shijie/android/private-signing/
+/apps/shijie/android/local.properties
+/apps/shijie/android/.gradle/
+/apps/shijie/android/.cache/
+/apps/shijie/**/node_modules/

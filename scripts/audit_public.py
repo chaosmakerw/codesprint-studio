@@ -21,8 +21,44 @@ PUBLIC_ROOT = frozenset({
     "README.md", "LICENSE", "NOTICE", "SECURITY.md", "CONTRIBUTING.md",
     "THIRD_PARTY_NOTICES.md", ".gitignore", ".env.example", "run.py", "START.cmd",
 })
+SHIJIE_PREFIX = ("apps", "shijie")
+SHIJIE_ROOT = frozenset({"README.md", "CONTEXT.md", "LICENSE", "NOTICE", ".gitignore", "run.py", "START.cmd"})
+SHIJIE_SOURCE_FILES = frozenset({
+    "src/projectstudy/__init__.py", "src/projectstudy/analysis.py", "src/projectstudy/checks.py",
+    "src/projectstudy/contracts.py", "src/projectstudy/curriculum.py", "src/projectstudy/reviews.py",
+    "src/projectstudy/server.py", "src/projectstudy/store.py",
+    "web/index.html", "web/app.js", "web/style.css", "web/journey.css", "web/icon.svg", "web/offline-store.js",
+    "prompts/first-run.md", "prompts/reference.md", "prompts/project-coach.md",
+    "scripts/package.py", "scripts/qa_server.py", "scripts/verify_portable.py", "scripts/build_mobile_seed.py",
+    "scripts/verify_learning_journey.cjs", "scripts/verify_browser.cjs",
+    "docs/UPGRADE-0.4.1.md", "docs/VERIFICATION.md", "docs/ANDROID.md",
+    "android/build.py", "android/AndroidManifest.xml", "android/SECURITY.md",
+    "android/src/io/shijie/learning/MainActivity.java", "android/res/xml/data_extraction_rules.xml",
+    "android/res/values/styles.xml", "android/res/drawable/app_icon.xml",
+    "android/qa/verify_android.cjs",
+    "examples/mobile-seed.json",
+    "examples/java-demo/README.md", "examples/java-demo/learning-bundle.json",
+    "examples/java-demo/generate_bundle.py", "examples/java-demo/pom.xml",
+    "examples/java-demo/src/main/java/demo/study/ToolResult.java",
+    "examples/java-demo/src/main/java/demo/study/ToolDispatcher.java",
+    "examples/java-demo/src/main/java/demo/study/ToolArgumentValidator.java",
+    "examples/java-demo/src/main/java/demo/study/OrderTools.java",
+    "examples/java-demo/src/main/java/demo/study/OrderSummary.java",
+    "examples/java-demo/src/main/java/demo/study/OrderService.java",
+    "examples/java-demo/src/main/java/demo/study/FakeOrderService.java",
+    "examples/java-demo/src/main/java/demo/study/CurrentUserContext.java",
+    "examples/java-demo/src/main/java/demo/study/ConversationMemory.java",
+    "examples/python-notes/README.md", "examples/python-notes/learning-bundle.json",
+    "examples/python-notes/generate_bundle.py", "examples/python-notes/project/test_job_queue.py",
+    "examples/python-notes/project/job_queue.py", "examples/python-notes/materials/01-inputs.md",
+    "examples/python-notes/materials/02-dedup.md", "examples/python-notes/materials/03-lifecycle.md",
+    "examples/python-notes/materials/04-snapshot.md",
+})
+SHIJIE_PUBLIC_DIRS = frozenset({"src", "web", "prompts", "examples", "tests", "scripts", "docs", "android"})
+SHIJIE_GENERATED_PREFIXES = (("android", "build"), ("android", "dist"), ("android", "private-signing"),
+                             ("tests", "offline", "node_modules"))
 TEXT_EXTENSIONS = frozenset({
-    ".py", ".js", ".cjs", ".mjs", ".html", ".css", ".md", ".txt", ".json",
+    ".py", ".java", ".js", ".cjs", ".mjs", ".html", ".css", ".md", ".txt", ".json",
     ".yaml", ".yml", ".toml", ".xml", ".svg", ".csv", ".cmd", ".sh", ".gitignore",
 })
 FORBIDDEN_EXTENSIONS = frozenset({
@@ -32,7 +68,7 @@ FORBIDDEN_EXTENSIONS = frozenset({
 })
 FORBIDDEN_PARTS = frozenset({
     "node_modules", "__pycache__", ".venv", "private-signing", "uploads", "backups",
-    "data", "output", "dist", ".idea", ".vscode",
+    "data", "output", "dist", ".idea", ".vscode", "build", ".qa", ".gradle", ".cache",
 })
 SECRET_PATTERNS = (
     ("private-key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----\s+[A-Za-z0-9+/=]{24}")),
@@ -59,14 +95,32 @@ def safe_display(path: str, values: tuple[str, ...]) -> str:
     return path
 
 
+def shijie_path_allowed(path: PurePosixPath) -> bool:
+    """Only this named app, its original examples and declared Android shell."""
+    name, parts = path.as_posix(), path.parts
+    if name in SHIJIE_ROOT or name in SHIJIE_SOURCE_FILES:
+        return True
+    if len(parts) == 3 and parts[:2] == ("tests", "backend"):
+        return path.name.startswith("test_") and path.suffix == ".py"
+    if len(parts) == 3 and parts[:2] == ("tests", "offline"):
+        return path.suffix in {".cjs", ".js"} and (path.name.startswith(("test_", "verify_")) or path.name.endswith((".test.cjs", ".test.js")))
+    if len(parts) == 3 and parts[:2] == ("docs", "screenshots"):
+        return path.suffix.lower() == ".png"
+    return False
+
+
 def path_issue(name: str) -> str | None:
     path = PurePosixPath(name.replace("\\", "/"))
     if path.is_absolute() or ".." in path.parts or not path.parts:
         return "unsafe-path"
+    shijie = path.parts[:2] == SHIJIE_PREFIX
+    checked_path = PurePosixPath(*path.parts[2:]) if shijie else path
+    if shijie and len(path.parts) < 3:
+        return "outside-public-allowlist"
     if len(path.parts) == 1:
         if name not in PUBLIC_ROOT:
             return "outside-public-allowlist"
-    elif path.parts[0] not in PUBLIC_DIRS:
+    elif not shijie and path.parts[0] not in PUBLIC_DIRS:
         return "outside-public-allowlist"
     if any(part in FORBIDDEN_PARTS for part in path.parts[1:]):
         return "private-or-generated-directory"
@@ -74,8 +128,12 @@ def path_issue(name: str) -> str | None:
         return "private-environment-file"
     if path.suffix.lower() in FORBIDDEN_EXTENSIONS or ".sqlite3-" in path.name:
         return "private-data-or-binary"
+    if shijie and not shijie_path_allowed(checked_path):
+        return "outside-public-allowlist"
+    if shijie and len(checked_path.parts) == 1 and checked_path.name in SHIJIE_ROOT:
+        return None
     if path.suffix.lower() == ".png":
-        return None if len(path.parts) == 3 and path.parts[:2] == ("docs", "screenshots") else "binary-outside-screenshot-directory"
+        return None if len(checked_path.parts) == 3 and checked_path.parts[:2] == ("docs", "screenshots") else "binary-outside-screenshot-directory"
     if len(path.parts) > 1 and path.suffix.lower() not in TEXT_EXTENSIONS and path.name not in {"LICENSE", "NOTICE"}:
         return "unsupported-file-type"
     return None
@@ -167,6 +225,20 @@ def working_files(repo: Path):
             continue
         for path in sorted(base.rglob("*")):
             if path.is_file() and not any(part in {"__pycache__", ".pytest_cache"} for part in path.relative_to(base).parts):
+                yield path.relative_to(repo).as_posix(), path
+    app = repo / "apps" / "shijie"
+    for name in sorted(SHIJIE_ROOT):
+        path = app / name
+        if path.is_file():
+            yield path.relative_to(repo).as_posix(), path
+    for directory in sorted(SHIJIE_PUBLIC_DIRS):
+        base = app / directory
+        if not base.exists():
+            continue
+        for path in sorted(base.rglob("*")):
+            parts = path.relative_to(app).parts
+            generated = any(parts[:len(prefix)] == prefix for prefix in SHIJIE_GENERATED_PREFIXES)
+            if path.is_file() and not generated and not any(part in {"__pycache__", ".pytest_cache"} for part in parts):
                 yield path.relative_to(repo).as_posix(), path
 
 

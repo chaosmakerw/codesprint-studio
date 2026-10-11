@@ -1,0 +1,16 @@
+data/
+output/
+dist/
+.qa/
+node_modules/
+__pycache__/
+*.pyc
+.env
+*.sqlite*
+*.db
+*.backup.json
+local-project.json
+android/build/
+android/dist/
+android/private-signing/
+android/qa-tools/

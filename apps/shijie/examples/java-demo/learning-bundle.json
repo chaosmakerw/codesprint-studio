@@ -1,0 +1,4617 @@
+{
+  "schema_version": 2,
+  "title": "原创Java本人订单：从功能到真实调用链",
+  "project": {
+    "name": "Java本人订单教学示例"
+  },
+  "files": [
+    {
+      "path": "README.md",
+      "text": "# 本人订单教学示例\n\n这是为拾阶另写的最小 Java 17 示例，不是完整 Spring 应用，不连接数据库或模型。用它练习 Map、接口、构造器注入、record、Long 的值比较、提前返回和异常边界。\n\n模型可以提供工具名和参数，身份由 CurrentUserContext 提供。list_my_orders 不接受参数；校验成功后，OrderTools 只向服务传递当前身份。管理员身份也不会自动改变该工具的数据范围。\n\nFakeOrderService 保存两条固定订单，买家分别为 1001 和 1002。Fake 表示教学替身，不能据此声称持久化、真实认证或生产权限已验收。\n\nConversationMemory 故意采用普通 HashMap 并返回可变列表，供学生分析引用泄漏和并发边界。它不应被当作生产会话存储。\n\n在拾阶的准备说明中点击“体验Java示例”，或让自己的Agent按本机协议预览并导入本目录的 `learning-bundle.json`。然后按“项目总览 → 功能与调用链 → 周期总结 → 知识复习”学习：先明白用途，再看本人订单或会话消息功能的方法进入与返回，用成功、伪造字段、未登录和失败依赖追踪具体值。包内有 6 个知识讲义、16 道客观题和 4 道保留的开放练习；客观多选包含2、3、4个正确项，并留有干扰项。\n\n周期总结由学习者每隔设定的天数用自己的话写项目理解，不自动精确评分。刷题保留首答、错题、到期复习与80%本轮检测门槛。流程是源码教学推演；答对不证明已独立复现，更不证明真实模型、HTTP或生产权限。\n\n`generate_bundle.py` 只读取本目录固定的原创 Java、README 与 pom 文本并重新生成学习包，引用行号与 UTF-8 SHA256 同步更新；它不运行 Java。学习链的明确前提是调用者手动组合 Dispatcher、Validator、OrderTools、可信身份上下文与 Fake。示例没有 main、HTTP 入口、真实身份实现、框架装配、Converter 或数据库 Connection，不能把这些能力视为已有。\n"
+    },
+    {
+      "path": "pom.xml",
+      "text": "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n  <groupId>demo</groupId><artifactId>project-study-example</artifactId><version>1.0.0</version>\n  <properties><maven.compiler.release>17</maven.compiler.release><project.build.sourceEncoding>UTF-8</project.build.sourceEncoding></properties>\n</project>\n"
+    },
+    {
+      "path": "src/main/java/demo/study/ConversationMemory.java",
+      "text": "package demo.study;\n\nimport java.util.ArrayList;\nimport java.util.HashMap;\nimport java.util.List;\nimport java.util.Map;\n\npublic final class ConversationMemory {\n    private final Map<String, List<String>> conversations = new HashMap<>();\n\n    public void append(String key, String message) {\n        conversations.computeIfAbsent(key, ignored -> new ArrayList<>()).add(message);\n    }\n\n    public List<String> load(String key) {\n        return conversations.getOrDefault(key, List.of());\n    }\n}\n"
+    },
+    {
+      "path": "src/main/java/demo/study/CurrentUserContext.java",
+      "text": "package demo.study;\n\npublic interface CurrentUserContext {\n    Long getUserId();\n    boolean isAdmin();\n}\n"
+    },
+    {
+      "path": "src/main/java/demo/study/FakeOrderService.java",
+      "text": "package demo.study;\n\nimport java.util.ArrayList;\nimport java.util.List;\n\npublic final class FakeOrderService implements OrderService {\n    private final List<OrderSummary> orders = List.of(\n        new OrderSummary(1L, 1001L, \"接口练习册\", \"PAID\"),\n        new OrderSummary(2L, 1002L, \"集合练习册\", \"CREATED\")\n    );\n\n    @Override\n    public List<OrderSummary> listMyOrders(Long currentUserId) {\n        if (currentUserId == null) throw new IllegalArgumentException(\"身份不能为空\");\n        List<OrderSummary> result = new ArrayList<>();\n        for (OrderSummary order : orders) {\n            if (currentUserId.equals(order.buyerId())) { result.add(order); }\n        }\n        return result;\n    }\n}\n"
+    },
+    {
+      "path": "src/main/java/demo/study/OrderService.java",
+      "text": "package demo.study;\n\nimport java.util.List;\n\npublic interface OrderService {\n    List<OrderSummary> listMyOrders(Long currentUserId);\n}\n"
+    },
+    {
+      "path": "src/main/java/demo/study/OrderSummary.java",
+      "text": "package demo.study;\n\npublic record OrderSummary(Long orderId, Long buyerId, String productName, String status) {}\n"
+    },
+    {
+      "path": "src/main/java/demo/study/OrderTools.java",
+      "text": "package demo.study;\n\nimport java.util.List;\n\npublic final class OrderTools {\n    private final CurrentUserContext currentUserContext;\n    private final OrderService orderService;\n\n    public OrderTools(CurrentUserContext currentUserContext, OrderService orderService) {\n        this.currentUserContext = currentUserContext;\n        this.orderService = orderService;\n    }\n\n    public ToolResult<List<OrderSummary>> listMyOrders() {\n        Long currentUserId = currentUserContext.getUserId();\n        if (currentUserId == null) {\n            return ToolResult.failure(\"UNAUTHORIZED\", \"请先登录\");\n        }\n        List<OrderSummary> orders = orderService.listMyOrders(currentUserId);\n        return ToolResult.success(orders);\n    }\n}\n"
+    },
+    {
+      "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+      "text": "package demo.study;\n\nimport java.util.Map;\n\npublic final class ToolArgumentValidator {\n    public ToolResult<Void> validate(String toolName, Map<String, Object> arguments) {\n        if (\"list_my_orders\".equals(toolName)) {\n            if (arguments == null) {\n                return ToolResult.failure(\"MISSING_ARGUMENT\", \"请传入参数对象\");\n            }\n            if (!arguments.isEmpty()) {\n                return ToolResult.failure(\"UNKNOWN_ARGUMENT\", \"此工具不接受任何参数\");\n            }\n            return ToolResult.success(null);\n        }\n        return ToolResult.failure(\"UNKNOWN_TOOL\", \"工具未登记\");\n    }\n}\n"
+    },
+    {
+      "path": "src/main/java/demo/study/ToolDispatcher.java",
+      "text": "package demo.study;\n\nimport java.util.Map;\n\npublic final class ToolDispatcher {\n    private final ToolArgumentValidator validator;\n    private final OrderTools orderTools;\n\n    public ToolDispatcher(ToolArgumentValidator validator, OrderTools orderTools) {\n        this.validator = validator;\n        this.orderTools = orderTools;\n    }\n\n    public ToolResult<?> dispatch(String toolName, Map<String, Object> arguments) {\n        try {\n            ToolResult<Void> validation = validator.validate(toolName, arguments);\n            if (!validation.success()) { return validation; }\n            if (\"list_my_orders\".equals(toolName)) { return orderTools.listMyOrders(); }\n            return ToolResult.failure(\"UNKNOWN_TOOL\", \"工具未登记\");\n        } catch (RuntimeException failure) {\n            return ToolResult.failure(\"INTERNAL_ERROR\", \"工具执行失败\");\n        }\n    }\n}\n"
+    },
+    {
+      "path": "src/main/java/demo/study/ToolResult.java",
+      "text": "package demo.study;\n\npublic record ToolResult<T>(boolean success, String code, String message, T data) {\n    public static <T> ToolResult<T> success(T data) {\n        return new ToolResult<>(true, \"OK\", \"\", data);\n    }\n    public static <T> ToolResult<T> failure(String code, String message) {\n        return new ToolResult<>(false, code, message, null);\n    }\n}\n"
+    }
+  ],
+  "concepts": [
+    {
+      "id": "java-types",
+      "title": "这一条订单链的类型怎样变化",
+      "group": "Java 基础",
+      "prerequisites": [],
+      "explanation": "Map 的键是 String，值可以是 Object；校验结果是 ToolResult<Void>，订单成功结果是 ToolResult<List<OrderSummary>>。Long 是引用类型，record 的访问方法读取字段。",
+      "mechanism": "原始空 Map 进入 dispatch；validate 返回成功且 data=null 的 ToolResult<Void>；Tools 取 Long 身份；Service 返回 List<OrderSummary>；Tools 把列表放入带泛型的 ToolResult。",
+      "why": "接口边界用类型表达各阶段职责；无参数工具无需数值转换。ToolResult<?> 允许分发器返回不同数据类型，不能靠通配符直接认定内部数据就是订单列表。",
+      "failures": [
+        "把 Void 的 null 数据当作校验失败",
+        "认为 Object 允许模型设置可信身份",
+        "用 == 比较两个 Long 的身份",
+        "认为 record 会深度冻结它持有的所有对象"
+      ],
+      "lesson": "先看一次具体请求：toolName 是 String，值为 list_my_orders；arguments 的声明类型是 Map<String,Object>，值为空 Map。尖括号里的 String 和 Object 是泛型类型参数，它们约束键和值的使用，Object 并不代表值可信。工具禁止任何参数，所以这一次 Map 只提供空参数对象。\n\nvalidate 的返回类型是 ToolResult<Void>。Void 在这里表达没有业务数据，success(null) 得到 success=true、code=OK、message=空串、data=null；判断是否通过看 success()，不能看 data 是否为空。record ToolResult<T> 声明了这四个组成部分，Java 为它生成 success()、code()、message()、data() 访问方法。T 是调用时确定的数据类型；同名静态工厂 success(data) 根据传入数据创建新结果。\n\nOrderTools 声明 currentUserId 为 Long，假设可信上下文返回 1001L。L 表示 long 字面量，赋给 Long 时装箱。接口调用返回 List<OrderSummary>，它表示订单记录列表；order.buyerId() 返回记录中的 Long。currentUserId.equals(order.buyerId()) 比较数值，1001L 与1001L相等，1001L 与1002L不等。Long 的 == 比较引用，不能把小数值缓存现象当作权限设计。\n\nTools 再把列表装进 ToolResult<List<OrderSummary>>。dispatch 声明返回 ToolResult<?>，问号是未知类型参数：这层只统一结果外形，并没有证明 data 的具体类型。一个业务成功但列表为空仍是 success=true；未登录失败则 success=false、data=null。\n\n请手写四行类型跟踪：arguments、validation、currentUserId、orders；再解释两个 data=null 为什么可能代表不同情况。验收要求说清声明类型、具体值、来源和 success 字段。这里只依据源码预测，没有编译Java或运行真实模型；看懂泛型还不等于能独立复现。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 14,
+          "quote": "    public ToolResult<?> dispatch(String toolName, Map<String, Object> arguments) {",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolResult.java",
+          "line": 3,
+          "quote": "public record ToolResult<T>(boolean success, String code, String message, T data) {",
+          "sha256": "c892b9f43e1efb93da06b05b3f1ed4d71218772255dbd21aed4d23f8b306ee19"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        }
+      ],
+      "references": []
+    },
+    {
+      "id": "control-flow",
+      "title": "在哪一行继续，在哪一行立即停止",
+      "group": "Java 基础",
+      "prerequisites": [
+        "java-types"
+      ],
+      "explanation": "if 判断决定分支；return 结束当前方法并把结果交还调用者；throw 沿调用栈传播到匹配的 catch。",
+      "mechanism": "Validator 先拒绝 null 或非空参数；Dispatcher 先检查 validation.success；Tools 先拒绝 null 身份；其余请求才进入 Fake 的 for 循环。",
+      "why": "把每个拒绝点安排在相应下游之前，能避免非法请求进入服务；Dispatcher 为意外 RuntimeException 提供稳定外部消息。",
+      "failures": [
+        "认为 return 只结束 if 块",
+        "在 Validator 已失败后仍画出 Service 调用",
+        "把成功空列表当异常",
+        "以为 catch 会让之前失败的方法继续执行"
+      ],
+      "lesson": "这条链有两种顺序：方法调用的进入与返回，以及每个方法内部的语句顺序。dispatch 进入 try 后，先调用 validate；validate 返回之前，dispatch 的下一行不会执行。合法空 Map 得到成功结果，随后 !validation.success() 是 false，才有机会调用 orderTools.listMyOrders()。\n\n把 arguments 换成 {buyerId:1002L}。Validator 的 arguments.isEmpty() 为 false，所以 !arguments.isEmpty() 为 true，它立即返回 UNKNOWN_ARGUMENT。return 结束 validate；返回到 dispatch 后，!validation.success() 成立，又立即 return validation。这里 Tools、身份上下文和Service都没有被调用。拒绝结果是预期业务行为，不是Java异常。\n\n把参数保持空 Map，只把可信上下文返回值换成 null。Tools 在 currentUserId==null 分支返回 UNAUTHORIZED。这次 Validator 与 Tools确实执行过，Service还没有被调用。返回结果沿原调用者交还，不能在手算中给 orders 一个从未产生的值。\n\n若已登录而注入的服务抛 RuntimeException，赋给 orders 的语句没有正常完成，Tools的success(orders)不执行。异常传到dispatch的catch，转换成INTERNAL_ERROR和固定消息。这里只声明RuntimeException边界，并没有超时、重试或日志根因记录。\n\n正常Fake实现用for遍历两条订单，if只把符合身份的记录add到result。for完成后return result；空列表也是正常返回。请预测未知工具、null参数、伪造字段、未登录、合法用户五种停止位置，再各写哪些层没有调用。验收看真实执行顺序和停止点；本例没有测试执行证据，不能声称线上异常已修复。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 17,
+          "quote": "            if (!validation.success()) { return validation; }",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        },
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 16,
+          "quote": "        if (currentUserId == null) {",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        }
+      ],
+      "references": []
+    },
+    {
+      "id": "interfaces-di",
+      "title": "为什么声明接口，却执行具体实现",
+      "group": "后端工程",
+      "prerequisites": [
+        "java-types"
+      ],
+      "explanation": "接口声明可调用的方法，构造器把具体对象传给使用它的类。依赖的声明类型和运行时对象类型可以不同。",
+      "mechanism": "教学前提是手动把服务器身份上下文与 new FakeOrderService() 传给OrderTools，再传给ToolDispatcher；orderService字段声明为OrderService，运行时执行FakeOrderService。",
+      "why": "Tools依赖业务接口，替换教学Fake和失败Stub时不必改Tools；本例手动注入即可，不需要Spring容器。",
+      "failures": [
+        "认为接口会自己生成实例",
+        "以为有构造器注入就已启动Spring",
+        "把Fake接口实现当真实数据库",
+        "未检查实现绑定就猜运行时返回"
+      ],
+      "lesson": "读OrderService.java时只有方法声明：List<OrderSummary> listMyOrders(Long currentUserId)。它规定调用者能向服务请求什么，没有订单数据，也不会自己new实现。FakeOrderService implements OrderService 表示它承诺实现这个方法。\n\nOrderTools的构造器接收CurrentUserContext与OrderService，把参数保存到this.currentUserContext和this.orderService。这里this指正在构造的Tools对象，右边同名参数是调用者传进来的对象引用。private final表示字段赋值后不能改指向，不保证被引用对象里的数据自动线程安全。\n\n本流程的明确前提是教学调用者手动组合：Validator对象；一个返回1001L的可信身份上下文；FakeOrderService对象；接收这两个依赖的OrderTools；最后接收Validator和Tools的Dispatcher。仓库没有main、Spring配置或身份接口实现，因而这些组合是解释性前提，源码不证明框架实际替我们装配过。\n\n执行orderService.listMyOrders(currentUserId)时，字段声明类型是OrderService，实际对象类型是假设注入的FakeOrderService；Java按运行时对象执行其覆盖方法。如果换成抛RuntimeException的Stub，仍满足接口，结果则走Dispatcher异常分支。Stub场景明确是另一个依赖前提，不能假称Fake源代码必然会抛异常。\n\n请先口述“谁把什么对象传给谁”，再在自己的练习区手写一个只实现OrderService的小Stub，说明它怎样触发catch。验收要求区分接口、实例、注入与调用，并指出这里没有Spring、HTTP、数据库或真实认证；静态组合练习还未证明独立实现或真实接入。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderService.java",
+          "line": 6,
+          "quote": "    List<OrderSummary> listMyOrders(Long currentUserId);",
+          "sha256": "82523005d4704c4bf532b60cfe0668d6c03e7bc2c2ce5370ad85794861c89f66"
+        },
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 11,
+          "quote": "        this.orderService = orderService;",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 6,
+          "quote": "public final class FakeOrderService implements OrderService {",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        }
+      ],
+      "references": []
+    },
+    {
+      "id": "identity-permission",
+      "title": "模型选功能，服务器决定查谁的订单",
+      "group": "安全边界",
+      "prerequisites": [
+        "control-flow",
+        "interfaces-di"
+      ],
+      "explanation": "可信身份与查询对象范围是两道约束。工具身份来自CurrentUserContext，Fake以buyerId归属过滤；模型不能用参数指定别人的身份。",
+      "mechanism": "空参数校验后读取1001L；传给Service；仅buyerId=1001L的订单1进入result。伪造buyerId字段在读取身份之前就被拒绝。",
+      "why": "让list_my_orders始终表示本人订单；上下文提供isAdmin也不会自动把本人功能变成查看全部。",
+      "failures": [
+        "把参数白名单当真实登录认证",
+        "让模型参数覆盖currentUserId",
+        "看到isAdmin方法就猜工具有管理员豁免",
+        "认为没有订单表示无权限错误"
+      ],
+      "lesson": "用户说“查看我的订单”，模型能选择list_my_orders工具名，但不能决定“我”是谁。本例工具不接收任何参数；Validator拒绝非空Map，这使{buyerId:1002L}、{userId:1002L}与{role:ADMIN}都停在UNKNOWN_ARGUMENT。字段名不是可信身份凭据。\n\n通过参数校验以后，Tools直接调用currentUserContext.getUserId()。这是服务器上下文接口；本教学案例明确假设注入的可信对象返回1001L。仓库只定义接口，并未实现登录、JWT校验或HTTP认证，所以我们能讲身份来源边界，不能宣称真实认证已运行。身份null在Tools立即UNAUTHORIZED，下游Service不执行。\n\n服务器身份1001L通过检查以后，Tools只把它交给OrderService。Fake固定保存订单1（买家1001L）和订单2（买家1002L），逐条比较currentUserId.equals(order.buyerId())。第一条相等，加入result；第二条不相等，跳过。Service还必须执行归属筛选，参数白名单本身并不能替代对象权限。\n\n把可信身份改成1002L就只返回订单2；改成9000L就成功返回空列表。CurrentUserContext还声明isAdmin()，但这条源码从未调用它。即使教学上下文的isAdmin返回true，list_my_orders仍只按当前ID过滤；接口多一个方法不代表这个功能使用了它。\n\n请先预测1001L+{}、1001L+{buyerId:1002L}、null+{}三组结果，并说明是否读取身份、是否调用Service。再只改变身份到1002L与9000L，对比合法结果。验收需要正常成功与安全拒绝两侧，解释同一条边界；本Fake没有数据库、生产认证、真实模型选择或实际运行证据，不能据此宣布生产权限验收。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 15,
+          "quote": "        Long currentUserId = currentUserContext.getUserId();",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ],
+      "references": []
+    },
+    {
+      "id": "collections-state",
+      "title": "列表里的订单，和返回列表的所有权",
+      "group": "Java 基础",
+      "prerequisites": [
+        "java-types"
+      ],
+      "explanation": "集合保存引用。List.of建立固定订单列表，new ArrayList每次建立筛选结果；record记录的订单字段不可通过setter修改，但返回ArrayList仍可变。",
+      "mechanism": "Fake遍历固定orders，把符合归属的OrderSummary引用add到新result；Tools把同一个结果列表放进ToolResult，没有再复制。",
+      "why": "筛选结果容器与固定源列表分开，调用者clear结果不会清空Fake源列表；可变结果列表仍需要调用者约束。",
+      "failures": [
+        "认为List接口必然不可变",
+        "认为record会让包含它的列表也不可变",
+        "把add(order)当深拷贝",
+        "认为ConversationMemory的HashMap保证并发或容量"
+      ],
+      "lesson": "Fake的orders字段用List.of创建两条固定OrderSummary。这个列表不支持add、remove等结构修改，但每个元素是对象引用。OrderSummary是record，提供orderId()、buyerId()等访问方法，没有setter；它的Long与String字段也是不可变值，本例不包含嵌套可变字段。\n\n每次调用listMyOrders都执行new ArrayList<>()，所以result是新容器。for(OrderSummary order : orders)每轮令局部order引用一条源记录；add(order)把这个引用放入result，不会复制订单对象。1001L这次result只装订单1，下一次1002L的result是另一容器，只装订单2。\n\nreturn result把此容器交给Tools，ToolResult.success(orders)又把同一个引用存入data；这里没有List.copyOf。如果调用者clear返回的列表，这次结果会变空，但Fake的源List.of列表保持两条。不能因此说整个ToolResult都深度不可变；record限制字段重新赋值，data所引用的ArrayList仍能变。\n\n还有一个独立会话小例：ConversationMemory.append通过computeIfAbsent取得或新建列表，接着add消息；load在键存在时直接返回内部列表，所以外部可修改会话。它与订单筛选链没有调用关系，不能把会话当作订单链节点；普通HashMap也没有容量、TTL、关闭或线程安全保证。\n\n请画三个容器：Fake源orders、当次result、ConversationMemory里的消息列表。用箭头标元素是否共享，再解释修改返回列表会影响哪一个容器。验收以引用和状态变化为准，若新增嵌套可变字段要重查拷贝边界。这里只静态阅读，未证明并发、持久化、生产会话或独立复现。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 7,
+          "quote": "    private final List<OrderSummary> orders = List.of(",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 15,
+          "quote": "        List<OrderSummary> result = new ArrayList<>();",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ConversationMemory.java",
+          "line": 16,
+          "quote": "        return conversations.getOrDefault(key, List.of());",
+          "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+        }
+      ],
+      "references": []
+    },
+    {
+      "id": "tool-calling",
+      "title": "这段分发器到底接入到哪一步",
+      "group": "Java 与 Agent",
+      "prerequisites": [
+        "identity-permission",
+        "java-types"
+      ],
+      "explanation": "Dispatcher接收工具名和原始Map，先校验，再进入登记工具，并统一RuntimeException结果。这是Java分发链，不代表真实模型已选择工具。",
+      "mechanism": "dispatch→validate；不成功提前返回；名称list_my_orders才调用Tools；Tools→上下文→Service→Fake→ToolResult→dispatch调用者。",
+      "why": "工具名和参数都在入口控制，避免模型直接绕过边界进入业务；无业务参数的本工具不需要Converter。",
+      "failures": [
+        "强行插入不存在的Converter",
+        "方法存在就认为模型已注册Schema",
+        "稳定INTERNAL_ERROR就认为内部故障修复了",
+        "把内存链称完整生产端到端"
+      ],
+      "lesson": "先把功能说成一句人话：一个已登录用户查看自己的固定示例订单。入口不是Controller，而是ToolDispatcher.dispatch(String,Map<String,Object>)这个普通Java方法。调用者必须已经持有Dispatcher对象并显式调用；示例仓库没有HTTP入口、模型协议注册或Tool Calling循环。\n\nDispatcher先直接调用validator.validate。Validator根据工具名决定规则：list_my_orders要求Map非null且为空；其它名字返回UNKNOWN_TOOL。Dispatcher拿到ToolResult<Void>后先看success()；拒绝时原样返回，成功时才调用orderTools.listMyOrders()。Tools读可信身份、调用业务接口、把列表包装成ToolResult成功。\n\n这条链没有ToolArgumentConverter。原因是此工具没有合法业务参数需要从Object转换；currentUserId从上下文取得，并非从Map转换。以后有其他工具要取整数参数时，才应根据那条实际源码讨论校验和安全转换，不能沿旧项目印象强插节点。\n\n若业务依赖抛RuntimeException，Dispatcher返回success=false、code=INTERNAL_ERROR、message=工具执行失败、data=null。这个稳定外形能避免把异常内容直接给调用者；当前源码没有日志根因、重试、超时或观测指标，固定错误不说明根因已解决。\n\n请脱离源码口述完整进入与返回顺序，并对每个边界说清输入、输出、为何先做。然后说明“Java方法存在”“分发器可路由”“Schema暴露”“真实模型选择”“结果回传”“最终回答”有哪些在本例有证据。验收要求明确只到Java分发层；源码预测还未证明运行、真实协议、Spring、数据库或生产端到端。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 16,
+          "quote": "            ToolResult<Void> validation = validator.validate(toolName, arguments);",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 18,
+          "quote": "            if (\"list_my_orders\".equals(toolName)) { return orderTools.listMyOrders(); }",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 20,
+          "quote": "        } catch (RuntimeException failure) {",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        }
+      ],
+      "references": []
+    }
+  ],
+  "activities": [
+    {
+      "id": "order-q01",
+      "concept_id": "identity-permission",
+      "kind": "predict",
+      "title": "用户1001查看本人",
+      "prompt": "可信ID1001L、工具list_my_orders、空Map、Fake服务。data是什么？ 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "订单1"
+        },
+        {
+          "id": "b",
+          "text": "订单2"
+        },
+        {
+          "id": "c",
+          "text": "两条订单"
+        },
+        {
+          "id": "d",
+          "text": "UNAUTHORIZED"
+        }
+      ],
+      "answer_ids": [
+        "a"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "A：只有订单1买家等于1001L；B属于1002，C忽略过滤，D忽略非null身份。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 15,
+          "quote": "        Long currentUserId = currentUserContext.getUserId();",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ]
+    },
+    {
+      "id": "order-q02",
+      "concept_id": "identity-permission",
+      "kind": "predict",
+      "title": "可信身份换成1002",
+      "prompt": "仅可信ID换成1002L，其余合法条件不变。 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "订单1"
+        },
+        {
+          "id": "b",
+          "text": "订单2"
+        },
+        {
+          "id": "c",
+          "text": "空列表"
+        },
+        {
+          "id": "d",
+          "text": "UNKNOWN_ARGUMENT"
+        }
+      ],
+      "answer_ids": [
+        "b"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "B：接口传1002L，过滤得到订单2；A忽略身份变化，C漏匹配，D无非法参数。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 15,
+          "quote": "        Long currentUserId = currentUserContext.getUserId();",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ]
+    },
+    {
+      "id": "order-q03",
+      "concept_id": "identity-permission",
+      "kind": "predict",
+      "title": "伪造买家参数",
+      "prompt": "可信ID1001L，参数Map.of(buyerId,1002L)。 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "订单2"
+        },
+        {
+          "id": "b",
+          "text": "订单1"
+        },
+        {
+          "id": "c",
+          "text": "UNKNOWN_ARGUMENT，Tools未调用"
+        },
+        {
+          "id": "d",
+          "text": "UNAUTHORIZED，Service未调用"
+        }
+      ],
+      "answer_ids": [
+        "c"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "C：非空Map在Validator拒绝；A/B都跳过校验，D把参数拒绝混成登录拒绝。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 15,
+          "quote": "        Long currentUserId = currentUserContext.getUserId();",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ]
+    },
+    {
+      "id": "order-q04",
+      "concept_id": "control-flow",
+      "kind": "predict",
+      "title": "未登录在哪停",
+      "prompt": "空Map合法，可信上下文getUserId返回null。 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "成功空列表"
+        },
+        {
+          "id": "b",
+          "text": "Tools返回UNAUTHORIZED，Service未调用"
+        },
+        {
+          "id": "c",
+          "text": "Fake返回订单1"
+        },
+        {
+          "id": "d",
+          "text": "Dispatcher拒绝非空Map"
+        }
+      ],
+      "answer_ids": [
+        "b"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "B：null身份在Tools提前return；A/C虚构下游，D参数实际为空。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 17,
+          "quote": "            if (!validation.success()) { return validation; }",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        },
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 16,
+          "quote": "        if (currentUserId == null) {",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        }
+      ]
+    },
+    {
+      "id": "order-q05",
+      "concept_id": "tool-calling",
+      "kind": "predict",
+      "title": "空Map与null参数",
+      "prompt": "参数为null，工具名正确。 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "MISSING_ARGUMENT"
+        },
+        {
+          "id": "b",
+          "text": "成功查询本人"
+        },
+        {
+          "id": "c",
+          "text": "UNKNOWN_ARGUMENT"
+        },
+        {
+          "id": "d",
+          "text": "UNKNOWN_TOOL"
+        }
+      ],
+      "answer_ids": [
+        "a"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "A：先判null；B跳过校验，C是非空Map规则，D工具名并未改变。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 16,
+          "quote": "            ToolResult<Void> validation = validator.validate(toolName, arguments);",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 18,
+          "quote": "            if (\"list_my_orders\".equals(toolName)) { return orderTools.listMyOrders(); }",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 20,
+          "quote": "        } catch (RuntimeException failure) {",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        }
+      ]
+    },
+    {
+      "id": "order-q06",
+      "concept_id": "tool-calling",
+      "kind": "predict",
+      "title": "未知工具名",
+      "prompt": "工具名all_orders，参数为空Map。 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "管理员自动放行"
+        },
+        {
+          "id": "b",
+          "text": "调用Fake返回全部"
+        },
+        {
+          "id": "c",
+          "text": "UNAUTHORIZED"
+        },
+        {
+          "id": "d",
+          "text": "UNKNOWN_TOOL且Tools未调用"
+        }
+      ],
+      "answer_ids": [
+        "d"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "D：Validator只登记list_my_orders；A/B无注册证据，C不读取身份。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 16,
+          "quote": "        return ToolResult.failure(\"UNKNOWN_TOOL\", \"工具未登记\");",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ]
+    },
+    {
+      "id": "order-q07",
+      "concept_id": "identity-permission",
+      "kind": "predict",
+      "title": "管理员ID无匹配订单",
+      "prompt": "可信ID9000L、isAdmin若被调用会返回true；合法空Map、Fake。 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "全部订单"
+        },
+        {
+          "id": "b",
+          "text": "成功空列表"
+        },
+        {
+          "id": "c",
+          "text": "UNAUTHORIZED"
+        },
+        {
+          "id": "d",
+          "text": "UNKNOWN_TOOL"
+        }
+      ],
+      "answer_ids": [
+        "b"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "B：此链根本不调用isAdmin，仍按ID过滤；A虚构豁免，C身份非null，D工具合法。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 15,
+          "quote": "        Long currentUserId = currentUserContext.getUserId();",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ]
+    },
+    {
+      "id": "order-q08",
+      "concept_id": "java-types",
+      "kind": "predict",
+      "title": "成功校验的null数据",
+      "prompt": "Validator对合法空Map返回success(null)。说明什么？ 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "校验失败"
+        },
+        {
+          "id": "b",
+          "text": "未登录"
+        },
+        {
+          "id": "c",
+          "text": "success=true，data=null，不携带订单"
+        },
+        {
+          "id": "d",
+          "text": "所有订单为空"
+        }
+      ],
+      "answer_ids": [
+        "c"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "C：Void表达无业务数据，判断结果用success字段；A/B/D误把null当业务含义。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 14,
+          "quote": "    public ToolResult<?> dispatch(String toolName, Map<String, Object> arguments) {",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolResult.java",
+          "line": 3,
+          "quote": "public record ToolResult<T>(boolean success, String code, String message, T data) {",
+          "sha256": "c892b9f43e1efb93da06b05b3f1ed4d71218772255dbd21aed4d23f8b306ee19"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        }
+      ]
+    },
+    {
+      "id": "order-q09",
+      "concept_id": "interfaces-di",
+      "kind": "predict",
+      "title": "声明与运行时类型",
+      "prompt": "字段orderService声明OrderService，明确注入FakeOrderService。执行哪个方法？ 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "FakeOrderService覆盖方法"
+        },
+        {
+          "id": "b",
+          "text": "接口自己创建SQL查询"
+        },
+        {
+          "id": "c",
+          "text": "Spring自动选择真实模型"
+        },
+        {
+          "id": "d",
+          "text": "不能调用接口方法"
+        }
+      ],
+      "answer_ids": [
+        "a"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "A：Java动态分派到已注入对象；B接口没有SQL，C本例无Spring或模型，D接口声明了可调用契约。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderService.java",
+          "line": 6,
+          "quote": "    List<OrderSummary> listMyOrders(Long currentUserId);",
+          "sha256": "82523005d4704c4bf532b60cfe0668d6c03e7bc2c2ce5370ad85794861c89f66"
+        },
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 11,
+          "quote": "        this.orderService = orderService;",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 6,
+          "quote": "public final class FakeOrderService implements OrderService {",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        }
+      ]
+    },
+    {
+      "id": "order-q10",
+      "concept_id": "collections-state",
+      "kind": "predict",
+      "title": "清空当次返回的结果列表",
+      "prompt": "1001L查询成功后，调用者clear data中列表；下一次新调用同样查询。 依据当前原创源码预测，未实际运行。",
+      "options": [
+        {
+          "id": "a",
+          "text": "永久删掉订单1"
+        },
+        {
+          "id": "b",
+          "text": "Fake源列表变空"
+        },
+        {
+          "id": "c",
+          "text": "record禁止clear"
+        },
+        {
+          "id": "d",
+          "text": "下一次仍返回订单1，新结果容器"
+        }
+      ],
+      "answer_ids": [
+        "d"
+      ],
+      "rubric": [
+        "结果与停止点准确",
+        "说明输入与依赖前提"
+      ],
+      "hints": [
+        "先沿查看本人订单链定位条件。",
+        "先算校验，再算可信身份和归属。",
+        "逐个写条件真假与未调用下游；不要把尚未出现的变量带入。"
+      ],
+      "explanation": "D：每次new ArrayList，源List.of未修改；A/B把容器混同，C record不冻结data列表。 预测答对不证明独立复现，当前未运行Java。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 7,
+          "quote": "    private final List<OrderSummary> orders = List.of(",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 15,
+          "quote": "        List<OrderSummary> result = new ArrayList<>();",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ConversationMemory.java",
+          "line": 16,
+          "quote": "        return conversations.getOrDefault(key, List.of());",
+          "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+        }
+      ]
+    },
+    {
+      "id": "order-trace",
+      "concept_id": "identity-permission",
+      "kind": "trace",
+      "title": "按进入和返回顺序手算",
+      "prompt": "先1001L+空Map，再伪造buyerId，再null身份。为每次列方法、变量类型/值/来源、返回与未调用层。",
+      "options": [],
+      "answer_ids": [],
+      "rubric": [
+        "三组结果与顺序正确",
+        "没有虚构Converter",
+        "orders只在服务正常返回后产生",
+        "未登录不调用Service"
+      ],
+      "hints": [
+        "先讲功能目标与边界。",
+        "沿每个实际方法输入输出建立执行表。",
+        "只给表头：入口｜类型和值｜条件｜调用或停止｜结果；实现与具体断言由你写。"
+      ],
+      "explanation": "开放回答逐项人工核对；未运行只算设计草案，测试通过也不自动说明独立复现。原项目保持只读。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 15,
+          "quote": "        Long currentUserId = currentUserContext.getUserId();",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ]
+    },
+    {
+      "id": "order-debug",
+      "concept_id": "java-types",
+      "kind": "debug",
+      "title": "为什么Long的等号比较危险",
+      "prompt": "若把equals改为==，解释风险并设计命中引用不同而数值相同的测试草案。原示例保持只读。",
+      "options": [],
+      "answer_ids": [],
+      "rubric": [
+        "区分引用相同与数值相同",
+        "不依赖小值缓存",
+        "保留合法匹配与不匹配对照",
+        "测试草案与实测明确区分"
+      ],
+      "hints": [
+        "先讲功能目标与边界。",
+        "沿每个实际方法输入输出建立执行表。",
+        "只给表头：入口｜类型和值｜条件｜调用或停止｜结果；实现与具体断言由你写。"
+      ],
+      "explanation": "开放回答逐项人工核对；未运行只算设计草案，测试通过也不自动说明独立复现。原项目保持只读。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 15,
+          "quote": "        Long currentUserId = currentUserContext.getUserId();",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ]
+    },
+    {
+      "id": "order-reproduce",
+      "concept_id": "tool-calling",
+      "kind": "reproduce",
+      "title": "独立复现最小本人订单边界",
+      "prompt": "在自己的练习区脱离源码写校验→可信身份→按买家过滤→稳定结果。提交成功、伪造字段、未登录、依赖异常四组测试与辅助记录。",
+      "options": [],
+      "answer_ids": [],
+      "rubric": [
+        "合法成功返回本人订单",
+        "伪造字段拒绝且下游不调用",
+        "未登录不调用Service",
+        "异常固定消息",
+        "实际命令结果与独立性记录"
+      ],
+      "hints": [
+        "先讲功能目标与边界。",
+        "沿每个实际方法输入输出建立执行表。",
+        "只给表头：入口｜类型和值｜条件｜调用或停止｜结果；实现与具体断言由你写。"
+      ],
+      "explanation": "开放回答逐项人工核对；未运行只算设计草案，测试通过也不自动说明独立复现。原项目保持只读。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 15,
+          "quote": "        Long currentUserId = currentUserContext.getUserId();",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ]
+    },
+    {
+      "id": "order-transfer",
+      "concept_id": "identity-permission",
+      "kind": "transfer",
+      "title": "48小时后设计独立管理工具",
+      "prompt": "至少48小时后用新输入设计list_all_orders管理员工具。说明可信管理员在哪验证，为什么不能放宽原本人工具参数。提交管理员成功和普通用户拒绝两侧设计与测试草案。",
+      "options": [],
+      "answer_ids": [],
+      "rubric": [
+        "原本人边界保留",
+        "管理员由可信上下文判断",
+        "两侧输入与拒绝后未调用下游",
+        "实际间隔与提示记录"
+      ],
+      "hints": [
+        "先讲功能目标与边界。",
+        "沿每个实际方法输入输出建立执行表。",
+        "只给表头：入口｜类型和值｜条件｜调用或停止｜结果；实现与具体断言由你写。"
+      ],
+      "explanation": "开放回答逐项人工核对；未运行只算设计草案，测试通过也不自动说明独立复现。原项目保持只读。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 15,
+          "quote": "        Long currentUserId = currentUserContext.getUserId();",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        },
+        {
+          "path": "src/main/java/demo/study/FakeOrderService.java",
+          "line": 17,
+          "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+          "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+        },
+        {
+          "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+          "line": 11,
+          "quote": "            if (!arguments.isEmpty()) {",
+          "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+        }
+      ],
+      "due_after_hours": 48
+    },
+    {
+      "id": "order-q11",
+      "concept_id": "java-types",
+      "kind": "predict",
+      "title": "工厂与访问器为何同名",
+      "prompt": "在当前ToolResult record里，哪些说法正确？",
+      "options": [
+        {
+          "id": "a",
+          "text": "success(null)是带一个数据参数的静态工厂"
+        },
+        {
+          "id": "b",
+          "text": "validation.success()是读取布尔字段的无参数实例访问器"
+        },
+        {
+          "id": "c",
+          "text": "两个调用都查询数据库"
+        },
+        {
+          "id": "d",
+          "text": "data为null必然说明失败"
+        }
+      ],
+      "answer_ids": [
+        "a",
+        "b"
+      ],
+      "rubric": [
+        "依据给定前提选择完整正确集合"
+      ],
+      "hints": [
+        "先确认哪个方法负责当前边界。",
+        "沿进入与返回顺序排除没有执行的节点。",
+        "用一个合法输入与一个拒绝输入对照；选择完整集合，不按词语熟悉程度猜。"
+      ],
+      "explanation": "“静态工厂”创建record；“布尔访问器”读取字段，这两项正确。两者都不访问数据库；校验成功可以data=null，因此不能用它代替success判断。 本题检测具体机制的回忆；不等于独立实现已验收。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolResult.java",
+          "line": 3,
+          "quote": "public record ToolResult<T>(boolean success, String code, String message, T data) {",
+          "sha256": "c892b9f43e1efb93da06b05b3f1ed4d71218772255dbd21aed4d23f8b306ee19"
+        }
+      ]
+    },
+    {
+      "id": "order-q12",
+      "concept_id": "control-flow",
+      "kind": "predict",
+      "title": "非法参数后完整停止范围",
+      "prompt": "dispatch(\"list_my_orders\", {buyerId:1002L})，可信上下文若读取会返回1001L。哪些方法实际未调用？",
+      "options": [
+        {
+          "id": "a",
+          "text": "CurrentUserContext.getUserId()"
+        },
+        {
+          "id": "b",
+          "text": "OrderTools.listMyOrders()"
+        },
+        {
+          "id": "c",
+          "text": "OrderService.listMyOrders(Long)"
+        },
+        {
+          "id": "d",
+          "text": "ToolArgumentValidator.validate(String,Map)"
+        }
+      ],
+      "answer_ids": [
+        "a",
+        "b",
+        "c"
+      ],
+      "rubric": [
+        "依据给定前提选择完整正确集合"
+      ],
+      "hints": [
+        "先确认哪个方法负责当前边界。",
+        "沿进入与返回顺序排除没有执行的节点。",
+        "用一个合法输入与一个拒绝输入对照；选择完整集合，不按词语熟悉程度猜。"
+      ],
+      "explanation": "身份读取、Tools入口、业务查询都在校验失败return之后，故三项未调用。校验器确实已执行并生成UNKNOWN_ARGUMENT，不能把它也说成跳过。 本题检测具体机制的回忆；不等于独立实现已验收。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 17,
+          "quote": "            if (!validation.success()) { return validation; }",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        }
+      ]
+    },
+    {
+      "id": "order-q13",
+      "concept_id": "interfaces-di",
+      "kind": "predict",
+      "title": "当前示例能证明到哪里",
+      "prompt": "只依据此示例源码，不额外假设运行环境。哪些判断有依据？",
+      "options": [
+        {
+          "id": "a",
+          "text": "Tools声明依赖OrderService接口"
+        },
+        {
+          "id": "b",
+          "text": "Fake提供该接口的一个具体实现"
+        },
+        {
+          "id": "c",
+          "text": "构造器允许把实现对象传给Tools"
+        },
+        {
+          "id": "d",
+          "text": "Dispatcher统一收口RuntimeException为固定错误"
+        },
+        {
+          "id": "e",
+          "text": "JWT认证和生产数据库已验收"
+        }
+      ],
+      "answer_ids": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ],
+      "rubric": [
+        "依据给定前提选择完整正确集合"
+      ],
+      "hints": [
+        "先确认哪个方法负责当前边界。",
+        "沿进入与返回顺序排除没有执行的节点。",
+        "用一个合法输入与一个拒绝输入对照；选择完整集合，不按词语熟悉程度猜。"
+      ],
+      "explanation": "接口依赖、Fake实现、构造器注入、固定异常边界都能回到源码。JWT与生产数据库在本示例不存在，不能从前四项推出生产能力。 本题检测具体机制的回忆；不等于独立实现已验收。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ToolDispatcher.java",
+          "line": 20,
+          "quote": "        } catch (RuntimeException failure) {",
+          "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+        }
+      ]
+    },
+    {
+      "id": "order-q14",
+      "concept_id": "collections-state",
+      "kind": "predict",
+      "title": "已存在会话的返回引用",
+      "prompt": "append(\"room-a\",\"你好\")后，view=load(\"room-a\")；调用者清空view，再load同一键。结果是什么？",
+      "options": [
+        {
+          "id": "a",
+          "text": "空列表，因为load没有复制已有列表"
+        },
+        {
+          "id": "b",
+          "text": "仍是你好，因为record自动深拷贝"
+        },
+        {
+          "id": "c",
+          "text": "Map自动删除room-a键"
+        },
+        {
+          "id": "d",
+          "text": "只有订单列表被清空"
+        }
+      ],
+      "answer_ids": [
+        "a"
+      ],
+      "rubric": [
+        "依据给定前提选择完整正确集合"
+      ],
+      "hints": [
+        "先确认哪个方法负责当前边界。",
+        "沿进入与返回顺序排除没有执行的节点。",
+        "用一个合法输入与一个拒绝输入对照；选择完整集合，不按词语熟悉程度猜。"
+      ],
+      "explanation": "“空列表”正确：已有键的getOrDefault返回内部列表引用，clear改变同一容器。此类不是record，未做复制；clear列表也不删除Map键，与订单无调用关系。 本题检测具体机制的回忆；不等于独立实现已验收。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ConversationMemory.java",
+          "line": 16,
+          "quote": "        return conversations.getOrDefault(key, List.of());",
+          "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+        }
+      ]
+    },
+    {
+      "id": "order-q15",
+      "concept_id": "collections-state",
+      "kind": "predict",
+      "title": "缺省会话读取与追加的差异",
+      "prompt": "全新实例load(\"room-z\")，之后append(\"room-z\",\"第一句\")。选择正确判断。",
+      "options": [
+        {
+          "id": "a",
+          "text": "load返回空列表且不补建Map键"
+        },
+        {
+          "id": "b",
+          "text": "之后append可创建新列表并成功追加"
+        },
+        {
+          "id": "c",
+          "text": "第一次load已永久缓存不可修改列表，所以append必失败"
+        },
+        {
+          "id": "d",
+          "text": "读取缺省键就是UNAUTHORIZED"
+        }
+      ],
+      "answer_ids": [
+        "a",
+        "b"
+      ],
+      "rubric": [
+        "依据给定前提选择完整正确集合"
+      ],
+      "hints": [
+        "先确认哪个方法负责当前边界。",
+        "沿进入与返回顺序排除没有执行的节点。",
+        "用一个合法输入与一个拒绝输入对照；选择完整集合，不按词语熟悉程度猜。"
+      ],
+      "explanation": "getOrDefault仅选择缺省返回值，因此“不补建键”正确；后续computeIfAbsent仍能建立新ArrayList，因此“成功追加”正确。没有永久缓存和认证判断，另两项无依据。 本题检测具体机制的回忆；不等于独立实现已验收。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/ConversationMemory.java",
+          "line": 12,
+          "quote": "        conversations.computeIfAbsent(key, ignored -> new ArrayList<>()).add(message);",
+          "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+        }
+      ]
+    },
+    {
+      "id": "order-q16",
+      "concept_id": "control-flow",
+      "kind": "predict",
+      "title": "失败依赖有没有订单局部值",
+      "prompt": "明确注入会抛RuntimeException的OrderService Stub。参数合法，可信身份1001L。哪些判断正确？",
+      "options": [
+        {
+          "id": "a",
+          "text": "orderService调用已发生"
+        },
+        {
+          "id": "b",
+          "text": "Tools的orders赋值未正常完成"
+        },
+        {
+          "id": "c",
+          "text": "Dispatcher返回固定INTERNAL_ERROR"
+        },
+        {
+          "id": "d",
+          "text": "Tools随后仍执行success(orders)"
+        }
+      ],
+      "answer_ids": [
+        "a",
+        "b",
+        "c"
+      ],
+      "rubric": [
+        "依据给定前提选择完整正确集合"
+      ],
+      "hints": [
+        "先确认哪个方法负责当前边界。",
+        "沿进入与返回顺序排除没有执行的节点。",
+        "用一个合法输入与一个拒绝输入对照；选择完整集合，不按词语熟悉程度猜。"
+      ],
+      "explanation": "调用发生后抛异常，正常返回缺失，所以orders赋值与成功包装未完成；异常沿调用栈进入Dispatcher catch并固定失败。“仍执行成功包装”错误。这个Stub是案例前提，不能声称Fake真的发生故障。 本题检测具体机制的回忆；不等于独立实现已验收。",
+      "evidence": [
+        {
+          "path": "src/main/java/demo/study/OrderTools.java",
+          "line": 19,
+          "quote": "        List<OrderSummary> orders = orderService.listMyOrders(currentUserId);",
+          "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+        }
+      ]
+    }
+  ],
+  "flows": [
+    {
+      "id": "my-orders",
+      "title": "查看本人订单",
+      "summary": "从一次功能请求进入真实Java分发链，最后回到调用者。依赖手动组合是明确教学前提，帧为静态预测；没有Converter、Spring、HTTP、数据库或真实模型调用。",
+      "scenario": "已登录用户想查看自己的订单；模型或调用者只选功能，服务器上下文决定查询身份。",
+      "input": "手动给Dispatcher注入Validator与OrderTools；Tools注入可信身份上下文和FakeOrderService。工具名list_my_orders、非null空Map、可信ID1001L。身份接口的真实实现与启动入口未包含在示例中。",
+      "expected": "成功只返回订单1；伪造参数先UNKNOWN_ARGUMENT；未登录UNAUTHORIZED且Service不调用；意外RuntimeException转INTERNAL_ERROR。",
+      "steps": [
+        {
+          "id": "wiring",
+          "title": "先认识谁交给谁，随后才开始请求",
+          "actor": "教学调用者手动装配",
+          "action": "假设调用者已构造Validator、可信身份上下文与Fake服务，再构造Tools与Dispatcher。仓库没有启动入口，此步是每个案例的装配前提，不是假装发现了实际main。",
+          "input": "CurrentUserContext接口的具体可信实现由案例约定；OrderService运行时是Fake或明确说明的失败Stub。",
+          "output": "Tools保存两条依赖引用；Dispatcher保存Validator与Tools引用。",
+          "why": "先确认实际实现，后面的接口调用才有确定含义。",
+          "concept_ids": [
+            "interfaces-di"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/OrderTools.java",
+              "line": 11,
+              "quote": "        this.orderService = orderService;",
+              "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+            },
+            {
+              "path": "src/main/java/demo/study/ToolDispatcher.java",
+              "line": 11,
+              "quote": "        this.orderTools = orderTools;",
+              "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+            }
+          ],
+          "methods": [
+            {
+              "id": "tools-construct",
+              "signature": "OrderTools(CurrentUserContext, OrderService)",
+              "relation": "call",
+              "input": "两个已构造的依赖对象引用",
+              "output": "Tools对象保存引用，OrderService的实际类型可为Fake",
+              "why": "构造器注入不等于Spring运行。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/OrderTools.java",
+                  "line": 9,
+                  "quote": "    public OrderTools(CurrentUserContext currentUserContext, OrderService orderService) {",
+                  "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+                }
+              ]
+            },
+            {
+              "id": "dispatcher-construct",
+              "signature": "ToolDispatcher(ToolArgumentValidator, OrderTools)",
+              "relation": "return",
+              "input": "校验器与Tools对象",
+              "output": "可由调用者显式调用的Dispatcher对象",
+              "why": "此处不猜测框架自动绑定。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 9,
+                  "quote": "    public ToolDispatcher(ToolArgumentValidator validator, OrderTools orderTools) {",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "entry",
+          "title": "接到工具请求，先去问校验器",
+          "actor": "分发器：ToolDispatcher.dispatch",
+          "action": "直接调用validator.validate(toolName, arguments)，等待依赖正常返回后才进入下一行。",
+          "input": "toolName=\"list_my_orders\"，String；arguments={}，Map<String,Object>",
+          "output": "把两个原始参数传给Validator，尚未得到validation",
+          "why": "原始模型参数先过白名单与参数边界。",
+          "concept_ids": [
+            "java-types",
+            "interfaces-di",
+            "tool-calling"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/ToolDispatcher.java",
+              "line": 16,
+              "quote": "            ToolResult<Void> validation = validator.validate(toolName, arguments);",
+              "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+            }
+          ],
+          "methods": [
+            {
+              "id": "dispatch-enter",
+              "signature": "ToolDispatcher.dispatch(String, Map<String,Object>)",
+              "relation": "call",
+              "input": "工具名String和原始参数Map",
+              "output": "等待validate结果；当前没有订单数据",
+              "why": "统一入口先保留未经信任的原始值。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 14,
+                  "quote": "    public ToolResult<?> dispatch(String toolName, Map<String, Object> arguments) {",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "validate",
+          "title": "工具登记了，参数也必须确实为空",
+          "actor": "校验器：ToolArgumentValidator.validate",
+          "action": "按真实源码先判工具名，再判arguments==null，再判非空；合法空Map返回ToolResult.success(null)。",
+          "input": "list_my_orders 与非null空Map",
+          "output": "校验结果ToolResult<Void>：success=true、code=OK、message=\"\"、data=null",
+          "why": "禁止从参数指定买家；无参数也要传一个空对象，null与空Map不同。",
+          "concept_ids": [
+            "java-types",
+            "control-flow",
+            "identity-permission"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+              "line": 11,
+              "quote": "            if (!arguments.isEmpty()) {",
+              "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+            },
+            {
+              "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+              "line": 8,
+              "quote": "            if (arguments == null) {",
+              "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+            },
+            {
+              "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+              "line": 16,
+              "quote": "        return ToolResult.failure(\"UNKNOWN_TOOL\", \"工具未登记\");",
+              "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+            }
+          ],
+          "methods": [
+            {
+              "id": "validate-enter",
+              "signature": "ToolArgumentValidator.validate(String, Map<String,Object>)",
+              "relation": "call",
+              "input": "同一工具名与Map引用",
+              "output": "先判断工具登记与参数边界",
+              "why": "所有业务请求先进入校验。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+                  "line": 6,
+                  "quote": "    public ToolResult<Void> validate(String toolName, Map<String, Object> arguments) {",
+                  "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+                }
+              ]
+            },
+            {
+              "id": "tool-name-equals",
+              "signature": "String.equals(Object)",
+              "relation": "return",
+              "input": "固定白名单名list_my_orders与传入toolName",
+              "output": "boolean：工具名是否匹配",
+              "why": "常量作接收者，传入null也可判不匹配。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+                  "line": 7,
+                  "quote": "        if (\"list_my_orders\".equals(toolName)) {",
+                  "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+                }
+              ]
+            },
+            {
+              "id": "map-empty",
+              "signature": "Map.isEmpty()",
+              "relation": "return",
+              "input": "已排除null的arguments",
+              "output": "boolean：是否无参数",
+              "why": "nullMap不能直接调用此方法。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+                  "line": 11,
+                  "quote": "            if (!arguments.isEmpty()) {",
+                  "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+                }
+              ]
+            },
+            {
+              "id": "validation-success-factory",
+              "signature": "ToolResult.success(T)",
+              "relation": "call",
+              "input": "校验数据Void=null",
+              "output": "准备创建成功校验结果",
+              "why": "成功是否成立由success字段决定。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolArgumentValidator.java",
+                  "line": 14,
+                  "quote": "            return ToolResult.success(null);",
+                  "sha256": "286bf4be3ba7725fa2114283e08cb8d9b7c3fca9897c8598053a0d21ef317981"
+                }
+              ]
+            },
+            {
+              "id": "validation-success-record",
+              "signature": "ToolResult(boolean, String, String, T)",
+              "relation": "return",
+              "input": "true、OK、空消息、null",
+              "output": "ToolResult<Void>：success=true，data=null",
+              "why": "record构造器存四个字段；没有业务订单。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolResult.java",
+                  "line": 5,
+                  "quote": "        return new ToolResult<>(true, \"OK\", \"\", data);",
+                  "sha256": "c892b9f43e1efb93da06b05b3f1ed4d71218772255dbd21aed4d23f8b306ee19"
+                }
+              ]
+            },
+            {
+              "id": "validation-failure-factory",
+              "signature": "ToolResult.failure(String, String)",
+              "relation": "call",
+              "input": "稳定错误码与固定中文消息",
+              "output": "准备创建参数或工具拒绝结果",
+              "why": "业务拒绝使用值返回，不是throw。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolResult.java",
+                  "line": 7,
+                  "quote": "    public static <T> ToolResult<T> failure(String code, String message) {",
+                  "sha256": "c892b9f43e1efb93da06b05b3f1ed4d71218772255dbd21aed4d23f8b306ee19"
+                }
+              ]
+            },
+            {
+              "id": "validation-failure-record",
+              "signature": "ToolResult(boolean, String, String, T)",
+              "relation": "return",
+              "input": "false、拒绝码、固定消息、null",
+              "output": "ToolResult<Void>：success=false",
+              "why": "不把输入Map当可信业务数据返回。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolResult.java",
+                  "line": 8,
+                  "quote": "        return new ToolResult<>(false, code, message, null);",
+                  "sha256": "c892b9f43e1efb93da06b05b3f1ed4d71218772255dbd21aed4d23f8b306ee19"
+                }
+              ]
+            },
+            {
+              "id": "validate-return",
+              "signature": "ToolArgumentValidator.validate(String, Map<String,Object>)",
+              "relation": "return",
+              "input": "已经生成的ToolResult<Void>",
+              "output": "同一个结果交还Dispatcher并绑定validation",
+              "why": "被调用方法先返回，调用者才继续。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 16,
+                  "quote": "            ToolResult<Void> validation = validator.validate(toolName, arguments);",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "route",
+          "title": "校验通过，才把请求交给订单工具",
+          "actor": "分发器：ToolDispatcher.dispatch",
+          "action": "依赖validate返回后绑定validation。先检查!validation.success()，失败立即return；通过后直接调用orderTools.listMyOrders()。",
+          "input": "validation为成功ToolResult<Void>；toolName为list_my_orders",
+          "output": "进入OrderTools；此工具没有业务参数，不调用Converter",
+          "why": "失败后不调用下游；按实际功能决定是否转换参数。",
+          "concept_ids": [
+            "control-flow",
+            "tool-calling"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/ToolDispatcher.java",
+              "line": 18,
+              "quote": "            if (\"list_my_orders\".equals(toolName)) { return orderTools.listMyOrders(); }",
+              "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+            },
+            {
+              "path": "src/main/java/demo/study/ToolDispatcher.java",
+              "line": 17,
+              "quote": "            if (!validation.success()) { return validation; }",
+              "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+            }
+          ],
+          "methods": [
+            {
+              "id": "validation-success-getter",
+              "signature": "ToolResult.success()",
+              "relation": "return",
+              "input": "validation对象",
+              "output": "boolean：参数校验是否成功",
+              "why": "record生成的访问器与有参数的静态工厂是不同方法。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 17,
+                  "quote": "            if (!validation.success()) { return validation; }",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            },
+            {
+              "id": "dispatch-reject",
+              "signature": "ToolDispatcher.dispatch(String, Map<String,Object>)",
+              "relation": "stop",
+              "input": "success=false的validation",
+              "output": "原样提前返回；Tools、身份、Service未调用",
+              "why": "return结束当前方法，后续行不执行。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 17,
+                  "quote": "            if (!validation.success()) { return validation; }",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            },
+            {
+              "id": "route-equals",
+              "signature": "String.equals(Object)",
+              "relation": "return",
+              "input": "toolName已经通过白名单",
+              "output": "true，准备调用登记Tools",
+              "why": "这是Dispatcher自己的路由判断。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 18,
+                  "quote": "            if (\"list_my_orders\".equals(toolName)) { return orderTools.listMyOrders(); }",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "identity",
+          "title": "从服务器取得“我”的身份",
+          "actor": "订单工具：OrderTools.listMyOrders → CurrentUserContext.getUserId",
+          "action": "直接调用身份接口；依赖返回后赋给Long currentUserId，null立即返回UNAUTHORIZED。这里的接口实现由教学前提指定，仓库未包含真实认证实现。",
+          "input": "空参数已通过校验；注入的可信上下文在本例返回1001L",
+          "output": "currentUserId=1001L，Long；继续，isAdmin未被调用",
+          "why": "身份来自服务器上下文；模型没有决定查谁的入口。",
+          "concept_ids": [
+            "identity-permission",
+            "interfaces-di",
+            "control-flow"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/OrderTools.java",
+              "line": 15,
+              "quote": "        Long currentUserId = currentUserContext.getUserId();",
+              "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+            },
+            {
+              "path": "src/main/java/demo/study/OrderTools.java",
+              "line": 16,
+              "quote": "        if (currentUserId == null) {",
+              "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+            }
+          ],
+          "methods": [
+            {
+              "id": "tools-enter",
+              "signature": "OrderTools.listMyOrders()",
+              "relation": "call",
+              "input": "无业务参数；两个依赖引用已保存",
+              "output": "读取可信上下文",
+              "why": "无参数工具不需要虚构Converter。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/OrderTools.java",
+                  "line": 14,
+                  "quote": "    public ToolResult<List<OrderSummary>> listMyOrders() {",
+                  "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+                }
+              ]
+            },
+            {
+              "id": "identity-getter",
+              "signature": "CurrentUserContext.getUserId()",
+              "relation": "return",
+              "input": "服务器提供的上下文依赖；不是原始Map",
+              "output": "Long：1001L、1002L、9000L或null",
+              "why": "接口实现未包含，实际值按案例前提解释。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/OrderTools.java",
+                  "line": 15,
+                  "quote": "        Long currentUserId = currentUserContext.getUserId();",
+                  "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+                }
+              ]
+            },
+            {
+              "id": "unauthorized-factory",
+              "signature": "ToolResult.failure(String, String)",
+              "relation": "call",
+              "input": "UNAUTHORIZED、请先登录",
+              "output": "准备创建身份拒绝值",
+              "why": "null身份立即拦截下游。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/OrderTools.java",
+                  "line": 17,
+                  "quote": "            return ToolResult.failure(\"UNAUTHORIZED\", \"请先登录\");",
+                  "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+                }
+              ]
+            },
+            {
+              "id": "unauthorized-record",
+              "signature": "ToolResult(boolean, String, String, T)",
+              "relation": "return",
+              "input": "false、UNAUTHORIZED、请先登录、null",
+              "output": "身份拒绝ToolResult，随后Tools提前返回",
+              "why": "对象工厂没有执行查询。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolResult.java",
+                  "line": 8,
+                  "quote": "        return new ToolResult<>(false, code, message, null);",
+                  "sha256": "c892b9f43e1efb93da06b05b3f1ed4d71218772255dbd21aed4d23f8b306ee19"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "service",
+          "title": "把这一个身份交给业务服务",
+          "actor": "订单工具：OrderTools.listMyOrders → OrderService.listMyOrders",
+          "action": "直接调用接口方法；本流程明确假设注入new FakeOrderService()，因此Java运行时执行该具体实现。等待列表或异常返回。",
+          "input": "currentUserId=1001L；字段orderService声明为OrderService，运行时对象为FakeOrderService",
+          "output": "参数Long 1001L进入Fake，orders局部尚未绑定返回值",
+          "why": "工具负责入口与身份，服务负责组织归属筛选；接口允许换实现。",
+          "concept_ids": [
+            "interfaces-di",
+            "identity-permission"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/OrderTools.java",
+              "line": 19,
+              "quote": "        List<OrderSummary> orders = orderService.listMyOrders(currentUserId);",
+              "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+            }
+          ],
+          "methods": [
+            {
+              "id": "service-call",
+              "signature": "OrderService.listMyOrders(Long) → 已注入实现",
+              "relation": "call",
+              "input": "可信currentUserId，不接受模型buyerId",
+              "output": "Fake正常返回列表；失败Stub可能抛异常",
+              "why": "按运行时对象动态分派，接口自身不建SQL。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/OrderTools.java",
+                  "line": 19,
+                  "quote": "        List<OrderSummary> orders = orderService.listMyOrders(currentUserId);",
+                  "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "filter",
+          "title": "逐条只保留买家属于当前用户的订单",
+          "actor": "教学服务：FakeOrderService.listMyOrders",
+          "action": "再次拒绝null；new ArrayList创建结果。for遍历固定订单，用Long.equals比较buyerId，相等才add；最后return result。",
+          "input": "currentUserId=1001L；源订单1买家1001L，订单2买家1002L",
+          "output": "result为新ArrayList<OrderSummary>，只含OrderSummary(1L,1001L,\"接口练习册\",\"PAID\")",
+          "why": "合法身份仍要约束对象归属；返回容器与源List.of分开，但元素引用共享。",
+          "concept_ids": [
+            "java-types",
+            "collections-state",
+            "identity-permission",
+            "control-flow"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/FakeOrderService.java",
+              "line": 17,
+              "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+              "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+            },
+            {
+              "path": "src/main/java/demo/study/FakeOrderService.java",
+              "line": 8,
+              "quote": "        new OrderSummary(1L, 1001L, \"接口练习册\", \"PAID\"),",
+              "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+            },
+            {
+              "path": "src/main/java/demo/study/FakeOrderService.java",
+              "line": 9,
+              "quote": "        new OrderSummary(2L, 1002L, \"集合练习册\", \"CREATED\")",
+              "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+            },
+            {
+              "path": "src/main/java/demo/study/FakeOrderService.java",
+              "line": 19,
+              "quote": "        return result;",
+              "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+            }
+          ],
+          "methods": [
+            {
+              "id": "fake-enter",
+              "signature": "FakeOrderService.listMyOrders(Long)",
+              "relation": "call",
+              "input": "当前案例的可信Long身份",
+              "output": "检查身份并新建结果列表",
+              "why": "业务实现也有非null身份边界。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/FakeOrderService.java",
+                  "line": 13,
+                  "quote": "    public List<OrderSummary> listMyOrders(Long currentUserId) {",
+                  "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+                }
+              ]
+            },
+            {
+              "id": "result-construct",
+              "signature": "ArrayList<OrderSummary>()",
+              "relation": "return",
+              "input": "每次查询初始为空",
+              "output": "一个新的可变result容器",
+              "why": "不把固定源orders直接交给调用者。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/FakeOrderService.java",
+                  "line": 15,
+                  "quote": "        List<OrderSummary> result = new ArrayList<>();",
+                  "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+                }
+              ]
+            },
+            {
+              "id": "buyer-getter",
+              "signature": "OrderSummary.buyerId()",
+              "relation": "return",
+              "input": "循环中当前订单记录",
+              "output": "Long：订单1为1001L，订单2为1002L",
+              "why": "读取该资源的实际归属，参与对象权限。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/FakeOrderService.java",
+                  "line": 17,
+                  "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+                  "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+                }
+              ]
+            },
+            {
+              "id": "identity-equals",
+              "signature": "Long.equals(Object)",
+              "relation": "return",
+              "input": "currentUserId与当前buyerId",
+              "output": "boolean：身份值是否相同",
+              "why": "比较值而不是Long引用是否同一对象。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/FakeOrderService.java",
+                  "line": 17,
+                  "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+                  "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+                }
+              ]
+            },
+            {
+              "id": "result-add",
+              "signature": "List.add(OrderSummary)",
+              "relation": "return",
+              "input": "匹配的同一订单对象引用",
+              "output": "result增加该记录；未匹配记录不调用add",
+              "why": "筛选不等于深拷贝元素。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/FakeOrderService.java",
+                  "line": 17,
+                  "quote": "            if (currentUserId.equals(order.buyerId())) { result.add(order); }",
+                  "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+                }
+              ]
+            },
+            {
+              "id": "fake-return",
+              "signature": "FakeOrderService.listMyOrders(Long)",
+              "relation": "return",
+              "input": "循环结束后的result",
+              "output": "List<OrderSummary>交还Tools；可为空列表",
+              "why": "成功空列表不等于权限异常。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/FakeOrderService.java",
+                  "line": 19,
+                  "quote": "        return result;",
+                  "sha256": "1fdee672259a849a452a19e518a9b25c3725b87067320da2f7b0331f33e73a01"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "wrap",
+          "title": "把订单列表放进稳定成功结果",
+          "actor": "订单工具：OrderTools.listMyOrders → ToolResult.success",
+          "action": "Service正常返回后绑定List<OrderSummary> orders，直接调用静态工厂并返回ToolResult；没有再复制列表。",
+          "input": "orders是Fake返回的同一个结果列表",
+          "output": "ToolResult<List<OrderSummary>>：success=true、code=OK、message=\"\"、data=orders",
+          "why": "统一结果外形，空列表也属于合法业务成功。",
+          "concept_ids": [
+            "java-types",
+            "collections-state",
+            "tool-calling"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/OrderTools.java",
+              "line": 20,
+              "quote": "        return ToolResult.success(orders);",
+              "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+            }
+          ],
+          "methods": [
+            {
+              "id": "orders-success-factory",
+              "signature": "ToolResult.success(List<OrderSummary>)",
+              "relation": "call",
+              "input": "正常返回后才绑定的orders",
+              "output": "准备成功业务结果",
+              "why": "异常时不存在这次成功包装。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/OrderTools.java",
+                  "line": 20,
+                  "quote": "        return ToolResult.success(orders);",
+                  "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+                }
+              ]
+            },
+            {
+              "id": "orders-success-record",
+              "signature": "ToolResult(boolean, String, String, T)",
+              "relation": "return",
+              "input": "true、OK、空消息、同一orders列表引用",
+              "output": "ToolResult<List<OrderSummary>>",
+              "why": "record不深度冻结可变列表。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolResult.java",
+                  "line": 5,
+                  "quote": "        return new ToolResult<>(true, \"OK\", \"\", data);",
+                  "sha256": "c892b9f43e1efb93da06b05b3f1ed4d71218772255dbd21aed4d23f8b306ee19"
+                }
+              ]
+            },
+            {
+              "id": "tools-return",
+              "signature": "OrderTools.listMyOrders()",
+              "relation": "return",
+              "input": "成功ToolResult",
+              "output": "同一对象返回Dispatcher",
+              "why": "结果沿调用栈向外返回。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 18,
+                  "quote": "            if (\"list_my_orders\".equals(toolName)) { return orderTools.listMyOrders(); }",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "return",
+          "title": "结果返回到调用者，意外异常在这里收口",
+          "actor": "分发器：ToolDispatcher.dispatch",
+          "action": "orderTools正常返回时直接return同一结果；如果下游抛RuntimeException，catch转换成固定失败。此处是依赖返回边界。",
+          "input": "Tools返回成功或业务失败；或出现RuntimeException",
+          "output": "正常原样返回；异常时success=false、INTERNAL_ERROR、工具执行失败、data=null",
+          "why": "调用者看到一致外形；固定消息不等于已诊断根因，本例无日志或重试。",
+          "concept_ids": [
+            "tool-calling",
+            "control-flow"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/ToolDispatcher.java",
+              "line": 20,
+              "quote": "        } catch (RuntimeException failure) {",
+              "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+            },
+            {
+              "path": "src/main/java/demo/study/ToolDispatcher.java",
+              "line": 18,
+              "quote": "            if (\"list_my_orders\".equals(toolName)) { return orderTools.listMyOrders(); }",
+              "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+            },
+            {
+              "path": "src/main/java/demo/study/ToolDispatcher.java",
+              "line": 21,
+              "quote": "            return ToolResult.failure(\"INTERNAL_ERROR\", \"工具执行失败\");",
+              "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+            }
+          ],
+          "methods": [
+            {
+              "id": "tools-unauthorized-return",
+              "signature": "OrderTools.listMyOrders()",
+              "relation": "stop",
+              "input": "身份拒绝结果",
+              "output": "UNAUTHORIZED交还Dispatcher；Service不调用",
+              "why": "业务失败仍是一次正常方法返回。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/OrderTools.java",
+                  "line": 17,
+                  "quote": "            return ToolResult.failure(\"UNAUTHORIZED\", \"请先登录\");",
+                  "sha256": "82eef53268a141943c0696c497dedf477e75d3ced196bf3615becb27cc48f952"
+                }
+              ]
+            },
+            {
+              "id": "service-exception",
+              "signature": "OrderService.listMyOrders(Long) 的失败Stub",
+              "relation": "stop",
+              "input": "案例明确另行注入的Stub",
+              "output": "RuntimeException沿Tools传播，orders赋值未完成",
+              "why": "现有Fake没有这条故障行为；不是实际故障注入记录。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 20,
+                  "quote": "        } catch (RuntimeException failure) {",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            },
+            {
+              "id": "internal-failure-factory",
+              "signature": "ToolResult.failure(String, String)",
+              "relation": "call",
+              "input": "INTERNAL_ERROR、工具执行失败",
+              "output": "准备固定错误结果，不输出异常内容",
+              "why": "catch阻止内部异常细节外泄。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 21,
+                  "quote": "            return ToolResult.failure(\"INTERNAL_ERROR\", \"工具执行失败\");",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            },
+            {
+              "id": "internal-failure-record",
+              "signature": "ToolResult(boolean, String, String, T)",
+              "relation": "return",
+              "input": "false、INTERNAL_ERROR、固定消息、null",
+              "output": "固定失败ToolResult",
+              "why": "稳定结果不等于修复根因或已经记录日志。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolResult.java",
+                  "line": 8,
+                  "quote": "        return new ToolResult<>(false, code, message, null);",
+                  "sha256": "c892b9f43e1efb93da06b05b3f1ed4d71218772255dbd21aed4d23f8b306ee19"
+                }
+              ]
+            },
+            {
+              "id": "dispatch-return",
+              "signature": "ToolDispatcher.dispatch(String, Map<String,Object>)",
+              "relation": "return",
+              "input": "Tools正常结果或catch固定失败",
+              "output": "ToolResult<?>交还原调用者",
+              "why": "完整结束请求，不继续执行已经停止的层。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ToolDispatcher.java",
+                  "line": 14,
+                  "quote": "    public ToolResult<?> dispatch(String toolName, Map<String, Object> arguments) {",
+                  "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "branches": [
+        {
+          "from_step_id": "validate",
+          "condition": "arguments==null",
+          "outcome": "MISSING_ARGUMENT，经route原样返回。",
+          "skipped_step_ids": [
+            "identity",
+            "service",
+            "filter",
+            "wrap",
+            "return"
+          ]
+        },
+        {
+          "from_step_id": "validate",
+          "condition": "arguments含buyerId/userId/role等任意键",
+          "outcome": "UNKNOWN_ARGUMENT，经route原样返回，身份没有读取。",
+          "skipped_step_ids": [
+            "identity",
+            "service",
+            "filter",
+            "wrap",
+            "return"
+          ]
+        },
+        {
+          "from_step_id": "validate",
+          "condition": "toolName不是list_my_orders",
+          "outcome": "UNKNOWN_TOOL，经route原样返回。",
+          "skipped_step_ids": [
+            "identity",
+            "service",
+            "filter",
+            "wrap",
+            "return"
+          ]
+        },
+        {
+          "from_step_id": "identity",
+          "condition": "currentUserId==null",
+          "outcome": "Tools提前返回UNAUTHORIZED，分发器正常交还该失败；不调用Service。",
+          "skipped_step_ids": [
+            "service",
+            "filter",
+            "wrap"
+          ]
+        },
+        {
+          "from_step_id": "filter",
+          "condition": "当前身份9000L与两条buyerId均不相等",
+          "outcome": "result=[]，仍正常走wrap与return，成功空列表。",
+          "skipped_step_ids": []
+        },
+        {
+          "from_step_id": "service",
+          "condition": "另行注入的OrderService Stub抛RuntimeException",
+          "outcome": "转至return的catch；固定INTERNAL_ERROR，没有成功数据。",
+          "skipped_step_ids": [
+            "filter",
+            "wrap"
+          ]
+        }
+      ],
+      "trace_cases": [
+        {
+          "id": "user-1001",
+          "title": "用户1001仅看见自己的订单",
+          "input": "手动注入可信上下文：getUserId返回1001L、isAdmin返回false；Service是Fake；dispatch(list_my_orders,空Map)。",
+          "result": "静态预测：success=true、code=OK、data=[OrderSummary(1L,1001L,\"接口练习册\",\"PAID\")]。isAdmin从未被调用；不是实际运行记录。",
+          "frames": [
+            {
+              "step_id": "wiring",
+              "method_id": "tools-construct",
+              "explanation": "案例装配前提：Tools保存可信上下文和服务对象引用。源码没有实际main；没有运行这些构造。",
+              "values": [
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "FakeOrderService对象",
+                  "source": "本案例的明确手动装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "wiring",
+              "method_id": "dispatcher-construct",
+              "explanation": "校验器和Tools保存到Dispatcher，随后由调用者发起功能。",
+              "values": [
+                {
+                  "name": "dispatcher",
+                  "type": "ToolDispatcher",
+                  "value": "持有Validator与Tools引用的对象",
+                  "source": "案例装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "entry",
+              "explanation": "调用者显式调用Java方法，尚未调用模型或HTTP。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "dispatch-enter"
+            },
+            {
+              "step_id": "validate",
+              "explanation": "dispatch同步进入validate，调用者暂时停在这一调用行。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "validate-enter"
+            },
+            {
+              "step_id": "validate",
+              "method_id": "tool-name-equals",
+              "explanation": "工具名匹配白名单。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "String.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "map-empty",
+              "explanation": "null检查通过以后才调用isEmpty。",
+              "values": [
+                {
+                  "name": "arguments.isEmpty()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "Map查询返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-factory",
+              "explanation": "合法空Map进入成功工厂，实参为null。",
+              "values": [
+                {
+                  "name": "data",
+                  "type": "Void",
+                  "value": "null",
+                  "source": "校验不携带业务数据"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-record",
+              "explanation": "构造成功record，工厂返回该对象。",
+              "values": [
+                {
+                  "name": "validation",
+                  "type": "ToolResult<Void>",
+                  "value": "success=true, code=OK, data=null",
+                  "source": "成功工厂返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validate-return",
+              "explanation": "validate返回后，Dispatcher的validation变量才完成赋值。",
+              "values": [
+                {
+                  "name": "validation.success",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "返回对象字段"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "validation-success-getter",
+              "explanation": "调用无参数success访问器，读取是否继续。",
+              "values": [
+                {
+                  "name": "validation.success()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "record访问器返回"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "route-equals",
+              "explanation": "路由名比较为true，才进入已登记Tools。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "list_my_orders",
+                  "source": "原始入口参数"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "method_id": "tools-enter",
+              "explanation": "进入无参数Tools方法，此时尚未产生currentUserId与orders。",
+              "values": [
+                {
+                  "name": "arguments",
+                  "type": "Map<String,Object>",
+                  "value": "{}（此方法不接收它）",
+                  "source": "Dispatcher已经校验的入口Map"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "explanation": "可信依赖返回Long，非null继续；不读取模型身份字段。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "1001L",
+                  "source": "CurrentUserContext.getUserId返回"
+                }
+              ],
+              "method_id": "identity-getter"
+            },
+            {
+              "step_id": "service",
+              "explanation": "通过接口把同一身份传给已假设注入的Fake。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "1001L",
+                  "source": "Tools局部参数"
+                },
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "FakeOrderService实例",
+                  "source": "教学手动注入前提"
+                }
+              ],
+              "method_id": "service-call"
+            },
+            {
+              "step_id": "filter",
+              "method_id": "fake-enter",
+              "explanation": "接口字段实际绑定Fake，进入它的覆盖方法；不是接口自动生成查询。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "1001L",
+                  "source": "Tools传来的同一可信身份"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "result-construct",
+              "explanation": "每次new一个空结果容器，源orders仍有两条。",
+              "values": [
+                {
+                  "name": "result",
+                  "type": "List<OrderSummary>（ArrayList）",
+                  "value": "[]",
+                  "source": "本次new ArrayList"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "buyer-getter",
+              "explanation": "第1轮先调用记录访问器；字段值没有来自模型。",
+              "values": [
+                {
+                  "name": "order.buyerId()",
+                  "type": "Long",
+                  "value": "1001L",
+                  "source": "固定订单1记录字段"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "identity-equals",
+              "explanation": "再调用Long.equals，1001L与1001L按值比较。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "Long.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "result-add",
+              "explanation": "匹配后才add同一个订单对象引用。未匹配一轮不执行add。",
+              "values": [
+                {
+                  "name": "result",
+                  "type": "List<OrderSummary>",
+                  "value": "[OrderSummary(1L,1001L,\"接口练习册\",\"PAID\")]",
+                  "source": "本轮List.add"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "buyer-getter",
+              "explanation": "第2轮先调用记录访问器；字段值没有来自模型。",
+              "values": [
+                {
+                  "name": "order.buyerId()",
+                  "type": "Long",
+                  "value": "1002L",
+                  "source": "固定订单2记录字段"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "identity-equals",
+              "explanation": "再调用Long.equals，1001L与1002L按值比较。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "Long.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "explanation": "两轮结束，Fake返回result。回到Tools的赋值行，orders与result引用同一列表。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "1001L",
+                  "source": "方法参数"
+                },
+                {
+                  "name": "result",
+                  "type": "List<OrderSummary>（运行时ArrayList）",
+                  "value": "[OrderSummary(1L,1001L,\"接口练习册\",\"PAID\")]",
+                  "source": "Fake筛选返回"
+                }
+              ],
+              "method_id": "fake-return"
+            },
+            {
+              "step_id": "wrap",
+              "explanation": "服务正常返回后才产生orders局部；传入成功工厂。",
+              "values": [
+                {
+                  "name": "orders",
+                  "type": "List<OrderSummary>",
+                  "value": "[OrderSummary(1L,1001L,\"接口练习册\",\"PAID\")]",
+                  "source": "OrderService返回，与result同一容器"
+                }
+              ],
+              "method_id": "orders-success-factory"
+            },
+            {
+              "step_id": "wrap",
+              "explanation": "成功工厂调用record构造器，再返回新结果对象，data仍引用同一可变列表。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data为List<OrderSummary>）",
+                  "value": "success=true, code=\"OK\", message=\"\", data=[OrderSummary(1L,1001L,\"接口练习册\",\"PAID\")]",
+                  "source": "OrderTools返回"
+                }
+              ],
+              "method_id": "orders-success-record"
+            },
+            {
+              "step_id": "wrap",
+              "explanation": "Tools正常return成功对象，调用者恢复为Dispatcher。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data为List<OrderSummary>）",
+                  "value": "success=true, code=\"OK\", message=\"\", data=[OrderSummary(1L,1001L,\"接口练习册\",\"PAID\")]",
+                  "source": "OrderTools返回"
+                }
+              ],
+              "method_id": "tools-return"
+            },
+            {
+              "step_id": "return",
+              "explanation": "直接交还同一个稳定结果。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data为List<OrderSummary>）",
+                  "value": "success=true, code=\"OK\", message=\"\", data=[OrderSummary(1L,1001L,\"接口练习册\",\"PAID\")]",
+                  "source": "OrderTools返回"
+                }
+              ],
+              "method_id": "dispatch-return"
+            }
+          ]
+        },
+        {
+          "id": "user-1002",
+          "title": "换可信用户1002，返回另一条",
+          "input": "手动注入可信上下文：getUserId返回1002L、isAdmin返回false；Service是Fake；dispatch(list_my_orders,空Map)。",
+          "result": "静态预测：success=true、code=OK、data=[OrderSummary(2L,1002L,\"集合练习册\",\"CREATED\")]。isAdmin从未被调用；不是实际运行记录。",
+          "frames": [
+            {
+              "step_id": "wiring",
+              "method_id": "tools-construct",
+              "explanation": "案例装配前提：Tools保存可信上下文和服务对象引用。源码没有实际main；没有运行这些构造。",
+              "values": [
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "FakeOrderService对象",
+                  "source": "本案例的明确手动装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "wiring",
+              "method_id": "dispatcher-construct",
+              "explanation": "校验器和Tools保存到Dispatcher，随后由调用者发起功能。",
+              "values": [
+                {
+                  "name": "dispatcher",
+                  "type": "ToolDispatcher",
+                  "value": "持有Validator与Tools引用的对象",
+                  "source": "案例装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "entry",
+              "explanation": "调用者显式调用Java方法，尚未调用模型或HTTP。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "dispatch-enter"
+            },
+            {
+              "step_id": "validate",
+              "explanation": "dispatch同步进入validate，调用者暂时停在这一调用行。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "validate-enter"
+            },
+            {
+              "step_id": "validate",
+              "method_id": "tool-name-equals",
+              "explanation": "工具名匹配白名单。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "String.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "map-empty",
+              "explanation": "null检查通过以后才调用isEmpty。",
+              "values": [
+                {
+                  "name": "arguments.isEmpty()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "Map查询返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-factory",
+              "explanation": "合法空Map进入成功工厂，实参为null。",
+              "values": [
+                {
+                  "name": "data",
+                  "type": "Void",
+                  "value": "null",
+                  "source": "校验不携带业务数据"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-record",
+              "explanation": "构造成功record，工厂返回该对象。",
+              "values": [
+                {
+                  "name": "validation",
+                  "type": "ToolResult<Void>",
+                  "value": "success=true, code=OK, data=null",
+                  "source": "成功工厂返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validate-return",
+              "explanation": "validate返回后，Dispatcher的validation变量才完成赋值。",
+              "values": [
+                {
+                  "name": "validation.success",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "返回对象字段"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "validation-success-getter",
+              "explanation": "调用无参数success访问器，读取是否继续。",
+              "values": [
+                {
+                  "name": "validation.success()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "record访问器返回"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "route-equals",
+              "explanation": "路由名比较为true，才进入已登记Tools。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "list_my_orders",
+                  "source": "原始入口参数"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "method_id": "tools-enter",
+              "explanation": "进入无参数Tools方法，此时尚未产生currentUserId与orders。",
+              "values": [
+                {
+                  "name": "arguments",
+                  "type": "Map<String,Object>",
+                  "value": "{}（此方法不接收它）",
+                  "source": "Dispatcher已经校验的入口Map"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "explanation": "可信依赖返回Long，非null继续；不读取模型身份字段。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "1002L",
+                  "source": "CurrentUserContext.getUserId返回"
+                }
+              ],
+              "method_id": "identity-getter"
+            },
+            {
+              "step_id": "service",
+              "explanation": "通过接口把同一身份传给已假设注入的Fake。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "1002L",
+                  "source": "Tools局部参数"
+                },
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "FakeOrderService实例",
+                  "source": "教学手动注入前提"
+                }
+              ],
+              "method_id": "service-call"
+            },
+            {
+              "step_id": "filter",
+              "method_id": "fake-enter",
+              "explanation": "接口字段实际绑定Fake，进入它的覆盖方法；不是接口自动生成查询。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "1002L",
+                  "source": "Tools传来的同一可信身份"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "result-construct",
+              "explanation": "每次new一个空结果容器，源orders仍有两条。",
+              "values": [
+                {
+                  "name": "result",
+                  "type": "List<OrderSummary>（ArrayList）",
+                  "value": "[]",
+                  "source": "本次new ArrayList"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "buyer-getter",
+              "explanation": "第1轮先调用记录访问器；字段值没有来自模型。",
+              "values": [
+                {
+                  "name": "order.buyerId()",
+                  "type": "Long",
+                  "value": "1001L",
+                  "source": "固定订单1记录字段"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "identity-equals",
+              "explanation": "再调用Long.equals，1002L与1001L按值比较。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "Long.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "buyer-getter",
+              "explanation": "第2轮先调用记录访问器；字段值没有来自模型。",
+              "values": [
+                {
+                  "name": "order.buyerId()",
+                  "type": "Long",
+                  "value": "1002L",
+                  "source": "固定订单2记录字段"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "identity-equals",
+              "explanation": "再调用Long.equals，1002L与1002L按值比较。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "Long.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "result-add",
+              "explanation": "匹配后才add同一个订单对象引用。未匹配一轮不执行add。",
+              "values": [
+                {
+                  "name": "result",
+                  "type": "List<OrderSummary>",
+                  "value": "[OrderSummary(2L,1002L,\"集合练习册\",\"CREATED\")]",
+                  "source": "本轮List.add"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "explanation": "两轮结束，Fake返回result。回到Tools的赋值行，orders与result引用同一列表。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "1002L",
+                  "source": "方法参数"
+                },
+                {
+                  "name": "result",
+                  "type": "List<OrderSummary>（运行时ArrayList）",
+                  "value": "[OrderSummary(2L,1002L,\"集合练习册\",\"CREATED\")]",
+                  "source": "Fake筛选返回"
+                }
+              ],
+              "method_id": "fake-return"
+            },
+            {
+              "step_id": "wrap",
+              "explanation": "服务正常返回后才产生orders局部；传入成功工厂。",
+              "values": [
+                {
+                  "name": "orders",
+                  "type": "List<OrderSummary>",
+                  "value": "[OrderSummary(2L,1002L,\"集合练习册\",\"CREATED\")]",
+                  "source": "OrderService返回，与result同一容器"
+                }
+              ],
+              "method_id": "orders-success-factory"
+            },
+            {
+              "step_id": "wrap",
+              "explanation": "成功工厂调用record构造器，再返回新结果对象，data仍引用同一可变列表。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data为List<OrderSummary>）",
+                  "value": "success=true, code=\"OK\", message=\"\", data=[OrderSummary(2L,1002L,\"集合练习册\",\"CREATED\")]",
+                  "source": "OrderTools返回"
+                }
+              ],
+              "method_id": "orders-success-record"
+            },
+            {
+              "step_id": "wrap",
+              "explanation": "Tools正常return成功对象，调用者恢复为Dispatcher。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data为List<OrderSummary>）",
+                  "value": "success=true, code=\"OK\", message=\"\", data=[OrderSummary(2L,1002L,\"集合练习册\",\"CREATED\")]",
+                  "source": "OrderTools返回"
+                }
+              ],
+              "method_id": "tools-return"
+            },
+            {
+              "step_id": "return",
+              "explanation": "直接交还同一个稳定结果。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data为List<OrderSummary>）",
+                  "value": "success=true, code=\"OK\", message=\"\", data=[OrderSummary(2L,1002L,\"集合练习册\",\"CREATED\")]",
+                  "source": "OrderTools返回"
+                }
+              ],
+              "method_id": "dispatch-return"
+            }
+          ]
+        },
+        {
+          "id": "user-9000",
+          "title": "管理员身份也只按本人ID过滤",
+          "input": "手动注入可信上下文：getUserId返回9000L、isAdmin返回true；Service是Fake；dispatch(list_my_orders,空Map)。",
+          "result": "静态预测：success=true、code=OK、data=[]。isAdmin从未被调用；不是实际运行记录。",
+          "frames": [
+            {
+              "step_id": "wiring",
+              "method_id": "tools-construct",
+              "explanation": "案例装配前提：Tools保存可信上下文和服务对象引用。源码没有实际main；没有运行这些构造。",
+              "values": [
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "FakeOrderService对象",
+                  "source": "本案例的明确手动装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "wiring",
+              "method_id": "dispatcher-construct",
+              "explanation": "校验器和Tools保存到Dispatcher，随后由调用者发起功能。",
+              "values": [
+                {
+                  "name": "dispatcher",
+                  "type": "ToolDispatcher",
+                  "value": "持有Validator与Tools引用的对象",
+                  "source": "案例装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "entry",
+              "explanation": "调用者显式调用Java方法，尚未调用模型或HTTP。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "dispatch-enter"
+            },
+            {
+              "step_id": "validate",
+              "explanation": "dispatch同步进入validate，调用者暂时停在这一调用行。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "validate-enter"
+            },
+            {
+              "step_id": "validate",
+              "method_id": "tool-name-equals",
+              "explanation": "工具名匹配白名单。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "String.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "map-empty",
+              "explanation": "null检查通过以后才调用isEmpty。",
+              "values": [
+                {
+                  "name": "arguments.isEmpty()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "Map查询返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-factory",
+              "explanation": "合法空Map进入成功工厂，实参为null。",
+              "values": [
+                {
+                  "name": "data",
+                  "type": "Void",
+                  "value": "null",
+                  "source": "校验不携带业务数据"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-record",
+              "explanation": "构造成功record，工厂返回该对象。",
+              "values": [
+                {
+                  "name": "validation",
+                  "type": "ToolResult<Void>",
+                  "value": "success=true, code=OK, data=null",
+                  "source": "成功工厂返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validate-return",
+              "explanation": "validate返回后，Dispatcher的validation变量才完成赋值。",
+              "values": [
+                {
+                  "name": "validation.success",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "返回对象字段"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "validation-success-getter",
+              "explanation": "调用无参数success访问器，读取是否继续。",
+              "values": [
+                {
+                  "name": "validation.success()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "record访问器返回"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "route-equals",
+              "explanation": "路由名比较为true，才进入已登记Tools。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "list_my_orders",
+                  "source": "原始入口参数"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "method_id": "tools-enter",
+              "explanation": "进入无参数Tools方法，此时尚未产生currentUserId与orders。",
+              "values": [
+                {
+                  "name": "arguments",
+                  "type": "Map<String,Object>",
+                  "value": "{}（此方法不接收它）",
+                  "source": "Dispatcher已经校验的入口Map"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "explanation": "可信依赖返回Long，非null继续；不读取模型身份字段。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "9000L",
+                  "source": "CurrentUserContext.getUserId返回"
+                }
+              ],
+              "method_id": "identity-getter"
+            },
+            {
+              "step_id": "service",
+              "explanation": "通过接口把同一身份传给已假设注入的Fake。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "9000L",
+                  "source": "Tools局部参数"
+                },
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "FakeOrderService实例",
+                  "source": "教学手动注入前提"
+                }
+              ],
+              "method_id": "service-call"
+            },
+            {
+              "step_id": "filter",
+              "method_id": "fake-enter",
+              "explanation": "接口字段实际绑定Fake，进入它的覆盖方法；不是接口自动生成查询。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "9000L",
+                  "source": "Tools传来的同一可信身份"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "result-construct",
+              "explanation": "每次new一个空结果容器，源orders仍有两条。",
+              "values": [
+                {
+                  "name": "result",
+                  "type": "List<OrderSummary>（ArrayList）",
+                  "value": "[]",
+                  "source": "本次new ArrayList"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "buyer-getter",
+              "explanation": "第1轮先调用记录访问器；字段值没有来自模型。",
+              "values": [
+                {
+                  "name": "order.buyerId()",
+                  "type": "Long",
+                  "value": "1001L",
+                  "source": "固定订单1记录字段"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "identity-equals",
+              "explanation": "再调用Long.equals，9000L与1001L按值比较。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "Long.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "buyer-getter",
+              "explanation": "第2轮先调用记录访问器；字段值没有来自模型。",
+              "values": [
+                {
+                  "name": "order.buyerId()",
+                  "type": "Long",
+                  "value": "1002L",
+                  "source": "固定订单2记录字段"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "method_id": "identity-equals",
+              "explanation": "再调用Long.equals，9000L与1002L按值比较。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "Long.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "filter",
+              "explanation": "两轮结束，Fake返回result。回到Tools的赋值行，orders与result引用同一列表。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "9000L",
+                  "source": "方法参数"
+                },
+                {
+                  "name": "result",
+                  "type": "List<OrderSummary>（运行时ArrayList）",
+                  "value": "[]",
+                  "source": "Fake筛选返回"
+                }
+              ],
+              "method_id": "fake-return"
+            },
+            {
+              "step_id": "wrap",
+              "explanation": "服务正常返回后才产生orders局部；传入成功工厂。",
+              "values": [
+                {
+                  "name": "orders",
+                  "type": "List<OrderSummary>",
+                  "value": "[]",
+                  "source": "OrderService返回，与result同一容器"
+                }
+              ],
+              "method_id": "orders-success-factory"
+            },
+            {
+              "step_id": "wrap",
+              "explanation": "成功工厂调用record构造器，再返回新结果对象，data仍引用同一可变列表。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data为List<OrderSummary>）",
+                  "value": "success=true, code=\"OK\", message=\"\", data=[]",
+                  "source": "OrderTools返回"
+                }
+              ],
+              "method_id": "orders-success-record"
+            },
+            {
+              "step_id": "wrap",
+              "explanation": "Tools正常return成功对象，调用者恢复为Dispatcher。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data为List<OrderSummary>）",
+                  "value": "success=true, code=\"OK\", message=\"\", data=[]",
+                  "source": "OrderTools返回"
+                }
+              ],
+              "method_id": "tools-return"
+            },
+            {
+              "step_id": "return",
+              "explanation": "直接交还同一个稳定结果。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data为List<OrderSummary>）",
+                  "value": "success=true, code=\"OK\", message=\"\", data=[]",
+                  "source": "OrderTools返回"
+                }
+              ],
+              "method_id": "dispatch-return"
+            }
+          ]
+        },
+        {
+          "id": "forged-buyer",
+          "title": "模型伪造买家ID在参数校验处停止",
+          "input": "可信上下文若被读取会返回1001L；dispatch(\"list_my_orders\", Map.of(\"buyerId\",1002L))。",
+          "result": "静态预测：UNKNOWN_ARGUMENT、success=false、data=null；身份、Tools、Service均未调用。",
+          "frames": [
+            {
+              "step_id": "wiring",
+              "method_id": "tools-construct",
+              "explanation": "案例装配前提：Tools保存可信上下文和服务对象引用。源码没有实际main；没有运行这些构造。",
+              "values": [
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "FakeOrderService对象",
+                  "source": "本案例的明确手动装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "wiring",
+              "method_id": "dispatcher-construct",
+              "explanation": "校验器和Tools保存到Dispatcher，随后由调用者发起功能。",
+              "values": [
+                {
+                  "name": "dispatcher",
+                  "type": "ToolDispatcher",
+                  "value": "持有Validator与Tools引用的对象",
+                  "source": "案例装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "entry",
+              "explanation": "保留原始模型Map，不把其中ID当服务器身份。",
+              "values": [
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{\"buyerId\":1002L}",
+                  "source": "模型参数"
+                }
+              ],
+              "method_id": "dispatch-enter"
+            },
+            {
+              "step_id": "validate",
+              "explanation": "dispatch同步进入validate，调用者暂时停在这一调用行。",
+              "values": [
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{\"buyerId\":1002L}",
+                  "source": "模型参数"
+                }
+              ],
+              "method_id": "validate-enter"
+            },
+            {
+              "step_id": "validate",
+              "method_id": "tool-name-equals",
+              "explanation": "工具名匹配白名单。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "String.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "map-empty",
+              "explanation": "null检查通过以后才调用isEmpty。",
+              "values": [
+                {
+                  "name": "arguments.isEmpty()",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "Map查询返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-failure-factory",
+              "explanation": "触发实际拒绝条件，进入失败工厂；参数对象尚未被当作身份。",
+              "values": [
+                {
+                  "name": "code",
+                  "type": "String",
+                  "value": "UNKNOWN_ARGUMENT",
+                  "source": "对应拒绝分支的常量"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-failure-record",
+              "explanation": "构造失败record，工厂返回该对象。",
+              "values": [
+                {
+                  "name": "validation",
+                  "type": "ToolResult<Void>",
+                  "value": "success=false, code=UNKNOWN_ARGUMENT, data=null",
+                  "source": "工厂构造返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validate-return",
+              "explanation": "validate返回后，Dispatcher的validation变量才完成赋值。",
+              "values": [
+                {
+                  "name": "validation.success",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "返回对象字段"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "validation-success-getter",
+              "explanation": "调用无参数success访问器，读取是否继续。",
+              "values": [
+                {
+                  "name": "validation.success()",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "record访问器返回"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "explanation": "Dispatcher原样提前return。Tools、getUserId、Service、Fake及成功包装均未执行；原服务固定数据未改变。",
+              "values": [
+                {
+                  "name": "validation",
+                  "type": "ToolResult<Void>",
+                  "value": "success=false, code=\"UNKNOWN_ARGUMENT\", message=\"此工具不接受任何参数\", data=null",
+                  "source": "Validator拒绝"
+                }
+              ],
+              "method_id": "dispatch-reject"
+            }
+          ],
+          "skipped_step_ids": [
+            "identity",
+            "service",
+            "filter",
+            "wrap",
+            "return"
+          ]
+        },
+        {
+          "id": "missing-map",
+          "title": "null并不等于空参数对象",
+          "input": "dispatch(\"list_my_orders\", null)，上下文不应被读取。",
+          "result": "静态预测：MISSING_ARGUMENT；Tools与Service未调用。",
+          "frames": [
+            {
+              "step_id": "wiring",
+              "method_id": "tools-construct",
+              "explanation": "案例装配前提：Tools保存可信上下文和服务对象引用。源码没有实际main；没有运行这些构造。",
+              "values": [
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "FakeOrderService对象",
+                  "source": "本案例的明确手动装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "wiring",
+              "method_id": "dispatcher-construct",
+              "explanation": "校验器和Tools保存到Dispatcher，随后由调用者发起功能。",
+              "values": [
+                {
+                  "name": "dispatcher",
+                  "type": "ToolDispatcher",
+                  "value": "持有Validator与Tools引用的对象",
+                  "source": "案例装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "entry",
+              "explanation": "仍进入校验器。",
+              "values": [
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "null",
+                  "source": "调用者参数"
+                }
+              ],
+              "method_id": "dispatch-enter"
+            },
+            {
+              "step_id": "validate",
+              "explanation": "dispatch同步进入validate，调用者暂时停在这一调用行。",
+              "values": [
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "null",
+                  "source": "调用者参数"
+                }
+              ],
+              "method_id": "validate-enter"
+            },
+            {
+              "step_id": "validate",
+              "method_id": "tool-name-equals",
+              "explanation": "工具名匹配白名单。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "String.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-failure-factory",
+              "explanation": "触发实际拒绝条件，进入失败工厂；参数对象尚未被当作身份。",
+              "values": [
+                {
+                  "name": "code",
+                  "type": "String",
+                  "value": "MISSING_ARGUMENT",
+                  "source": "对应拒绝分支的常量"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-failure-record",
+              "explanation": "构造失败record，工厂返回该对象。",
+              "values": [
+                {
+                  "name": "validation",
+                  "type": "ToolResult<Void>",
+                  "value": "success=false, code=MISSING_ARGUMENT, data=null",
+                  "source": "工厂构造返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validate-return",
+              "explanation": "validate返回后，Dispatcher的validation变量才完成赋值。",
+              "values": [
+                {
+                  "name": "validation.success",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "返回对象字段"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "validation-success-getter",
+              "explanation": "调用无参数success访问器，读取是否继续。",
+              "values": [
+                {
+                  "name": "validation.success()",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "record访问器返回"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "explanation": "Dispatcher原样提前return。Tools、getUserId、Service、Fake及成功包装均未执行；原服务固定数据未改变。",
+              "values": [
+                {
+                  "name": "validation.success()",
+                  "type": "boolean",
+                  "value": "false",
+                  "source": "结果访问方法"
+                }
+              ],
+              "method_id": "dispatch-reject"
+            }
+          ],
+          "skipped_step_ids": [
+            "identity",
+            "service",
+            "filter",
+            "wrap",
+            "return"
+          ]
+        },
+        {
+          "id": "logged-out",
+          "title": "未登录允许进入Tools，随后拒绝Service",
+          "input": "工具名list_my_orders、空Map；注入上下文getUserId返回null；Fake不应被调用。",
+          "result": "静态预测：UNAUTHORIZED；Service、筛选、成功包装均未执行。",
+          "frames": [
+            {
+              "step_id": "wiring",
+              "method_id": "tools-construct",
+              "explanation": "案例装配前提：Tools保存可信上下文和服务对象引用。源码没有实际main；没有运行这些构造。",
+              "values": [
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "FakeOrderService对象",
+                  "source": "本案例的明确手动装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "wiring",
+              "method_id": "dispatcher-construct",
+              "explanation": "校验器和Tools保存到Dispatcher，随后由调用者发起功能。",
+              "values": [
+                {
+                  "name": "dispatcher",
+                  "type": "ToolDispatcher",
+                  "value": "持有Validator与Tools引用的对象",
+                  "source": "案例装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "entry",
+              "explanation": "调用者显式调用Java方法，尚未调用模型或HTTP。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "dispatch-enter"
+            },
+            {
+              "step_id": "validate",
+              "explanation": "dispatch同步进入validate，调用者暂时停在这一调用行。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "validate-enter"
+            },
+            {
+              "step_id": "validate",
+              "method_id": "tool-name-equals",
+              "explanation": "工具名匹配白名单。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "String.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "map-empty",
+              "explanation": "null检查通过以后才调用isEmpty。",
+              "values": [
+                {
+                  "name": "arguments.isEmpty()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "Map查询返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-factory",
+              "explanation": "合法空Map进入成功工厂，实参为null。",
+              "values": [
+                {
+                  "name": "data",
+                  "type": "Void",
+                  "value": "null",
+                  "source": "校验不携带业务数据"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-record",
+              "explanation": "构造成功record，工厂返回该对象。",
+              "values": [
+                {
+                  "name": "validation",
+                  "type": "ToolResult<Void>",
+                  "value": "success=true, code=OK, data=null",
+                  "source": "成功工厂返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validate-return",
+              "explanation": "validate返回后，Dispatcher的validation变量才完成赋值。",
+              "values": [
+                {
+                  "name": "validation.success",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "返回对象字段"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "validation-success-getter",
+              "explanation": "调用无参数success访问器，读取是否继续。",
+              "values": [
+                {
+                  "name": "validation.success()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "record访问器返回"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "route-equals",
+              "explanation": "路由名比较为true，才进入已登记Tools。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "list_my_orders",
+                  "source": "原始入口参数"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "method_id": "tools-enter",
+              "explanation": "进入无参数Tools方法，此时尚未产生currentUserId与orders。",
+              "values": [
+                {
+                  "name": "arguments",
+                  "type": "Map<String,Object>",
+                  "value": "{}（此方法不接收它）",
+                  "source": "Dispatcher已经校验的入口Map"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "explanation": "读取null后立即返回，不产生orders。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "null",
+                  "source": "可信上下文返回"
+                }
+              ],
+              "method_id": "identity-getter"
+            },
+            {
+              "step_id": "identity",
+              "method_id": "unauthorized-factory",
+              "explanation": "身份是null，在调用Service之前进入失败工厂。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "null",
+                  "source": "可信上下文返回"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "method_id": "unauthorized-record",
+              "explanation": "构造UNAUTHORIZED结果并从工厂返回。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<List<OrderSummary>>",
+                  "value": "success=false, code=UNAUTHORIZED, data=null",
+                  "source": "失败工厂构造"
+                }
+              ]
+            },
+            {
+              "step_id": "return",
+              "method_id": "tools-unauthorized-return",
+              "explanation": "Tools提前返回，Service、过滤与成功包装未调用；不是查询成功空列表。",
+              "values": [
+                {
+                  "name": "orders",
+                  "type": "尚未绑定的局部变量",
+                  "value": "尚未产生",
+                  "source": "Service调用行未执行"
+                }
+              ]
+            },
+            {
+              "step_id": "return",
+              "explanation": "Dispatcher收到Tools业务失败，原样返回。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data=null）",
+                  "value": "success=false, code=\"UNAUTHORIZED\", message=\"请先登录\", data=null",
+                  "source": "Tools提前返回"
+                }
+              ],
+              "method_id": "dispatch-return"
+            }
+          ],
+          "skipped_step_ids": [
+            "service",
+            "filter",
+            "wrap"
+          ]
+        },
+        {
+          "id": "dependency-fails",
+          "title": "显式失败Stub的异常收口",
+          "input": "合法空Map、可信ID1001L；改为注入一个listMyOrders抛RuntimeException的OrderService Stub。这是假设依赖，不是现有Fake行为。",
+          "result": "静态预测：INTERNAL_ERROR、固定消息、data=null；没有Fake筛选或Tools成功包装。",
+          "frames": [
+            {
+              "step_id": "wiring",
+              "method_id": "tools-construct",
+              "explanation": "案例装配前提：Tools保存可信上下文和服务对象引用。源码没有实际main；没有运行这些构造。",
+              "values": [
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "失败Stub",
+                  "source": "本案例的明确手动装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "wiring",
+              "method_id": "dispatcher-construct",
+              "explanation": "校验器和Tools保存到Dispatcher，随后由调用者发起功能。",
+              "values": [
+                {
+                  "name": "dispatcher",
+                  "type": "ToolDispatcher",
+                  "value": "持有Validator与Tools引用的对象",
+                  "source": "案例装配前提"
+                }
+              ]
+            },
+            {
+              "step_id": "entry",
+              "explanation": "调用者显式调用Java方法，尚未调用模型或HTTP。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "dispatch-enter"
+            },
+            {
+              "step_id": "validate",
+              "explanation": "dispatch同步进入validate，调用者暂时停在这一调用行。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "\"list_my_orders\"",
+                  "source": "调用者参数"
+                },
+                {
+                  "name": "arguments",
+                  "type": "Map<String, Object>",
+                  "value": "{}",
+                  "source": "调用者提供的非null空Map"
+                }
+              ],
+              "method_id": "validate-enter"
+            },
+            {
+              "step_id": "validate",
+              "method_id": "tool-name-equals",
+              "explanation": "工具名匹配白名单。",
+              "values": [
+                {
+                  "name": "matches",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "String.equals返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "map-empty",
+              "explanation": "null检查通过以后才调用isEmpty。",
+              "values": [
+                {
+                  "name": "arguments.isEmpty()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "Map查询返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-factory",
+              "explanation": "合法空Map进入成功工厂，实参为null。",
+              "values": [
+                {
+                  "name": "data",
+                  "type": "Void",
+                  "value": "null",
+                  "source": "校验不携带业务数据"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validation-success-record",
+              "explanation": "构造成功record，工厂返回该对象。",
+              "values": [
+                {
+                  "name": "validation",
+                  "type": "ToolResult<Void>",
+                  "value": "success=true, code=OK, data=null",
+                  "source": "成功工厂返回"
+                }
+              ]
+            },
+            {
+              "step_id": "validate",
+              "method_id": "validate-return",
+              "explanation": "validate返回后，Dispatcher的validation变量才完成赋值。",
+              "values": [
+                {
+                  "name": "validation.success",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "返回对象字段"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "validation-success-getter",
+              "explanation": "调用无参数success访问器，读取是否继续。",
+              "values": [
+                {
+                  "name": "validation.success()",
+                  "type": "boolean",
+                  "value": "true",
+                  "source": "record访问器返回"
+                }
+              ]
+            },
+            {
+              "step_id": "route",
+              "method_id": "route-equals",
+              "explanation": "路由名比较为true，才进入已登记Tools。",
+              "values": [
+                {
+                  "name": "toolName",
+                  "type": "String",
+                  "value": "list_my_orders",
+                  "source": "原始入口参数"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "method_id": "tools-enter",
+              "explanation": "进入无参数Tools方法，此时尚未产生currentUserId与orders。",
+              "values": [
+                {
+                  "name": "arguments",
+                  "type": "Map<String,Object>",
+                  "value": "{}（此方法不接收它）",
+                  "source": "Dispatcher已经校验的入口Map"
+                }
+              ]
+            },
+            {
+              "step_id": "identity",
+              "explanation": "非null可信ID。",
+              "values": [
+                {
+                  "name": "currentUserId",
+                  "type": "Long",
+                  "value": "1001L",
+                  "source": "上下文返回"
+                }
+              ],
+              "method_id": "identity-getter"
+            },
+            {
+              "step_id": "service",
+              "explanation": "此次注入的是失败Stub，调用抛异常，orders未绑定。",
+              "values": [
+                {
+                  "name": "orderService",
+                  "type": "OrderService",
+                  "value": "抛RuntimeException的Stub实例",
+                  "source": "本案例明确假设"
+                }
+              ],
+              "method_id": "service-call"
+            },
+            {
+              "step_id": "return",
+              "method_id": "service-exception",
+              "explanation": "失败Stub抛出RuntimeException。Tools未正常返回；跳过Fake筛选与成功包装，沿调用栈到Dispatcher的catch。",
+              "values": [
+                {
+                  "name": "orders",
+                  "type": "尚未绑定的局部变量",
+                  "value": "尚未产生",
+                  "source": "服务正常返回前抛异常"
+                }
+              ]
+            },
+            {
+              "step_id": "return",
+              "method_id": "internal-failure-factory",
+              "explanation": "catch进入固定失败工厂，异常正文没有成为消息。",
+              "values": [
+                {
+                  "name": "code",
+                  "type": "String",
+                  "value": "INTERNAL_ERROR",
+                  "source": "catch常量"
+                }
+              ]
+            },
+            {
+              "step_id": "return",
+              "method_id": "internal-failure-record",
+              "explanation": "record构造固定错误并由工厂返回。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data=null）",
+                  "value": "success=false, code=INTERNAL_ERROR, message=工具执行失败",
+                  "source": "固定错误工厂"
+                }
+              ]
+            },
+            {
+              "step_id": "return",
+              "explanation": "异常到Dispatcher的catch，创建固定失败。",
+              "values": [
+                {
+                  "name": "failure",
+                  "type": "RuntimeException",
+                  "value": "Stub抛出的异常对象（内容不对外输出）",
+                  "source": "下游抛出"
+                },
+                {
+                  "name": "return",
+                  "type": "ToolResult<?>（data=null）",
+                  "value": "success=false, code=\"INTERNAL_ERROR\", message=\"工具执行失败\", data=null",
+                  "source": "catch返回"
+                }
+              ],
+              "method_id": "dispatch-return"
+            }
+          ],
+          "skipped_step_ids": [
+            "filter",
+            "wrap"
+          ]
+        }
+      ],
+      "resources": [
+        {
+          "name": "构造器注入的三个依赖对象引用",
+          "ownership": "教学调用者构造并交给Dispatcher/Tools；类字段private final保存引用。本例没有容器生命周期管理。",
+          "lifecycle": "构造时赋值，方法调用期间使用；没有close或真实认证生命周期。CurrentUserContext实现与运行绑定仅为案例明确前提。",
+          "failure": "校验失败时身份和Service均不调用；未登录时Service不调用。依赖对象未被替换或自动销毁。"
+        },
+        {
+          "name": "Fake固定orders与当次result列表",
+          "ownership": "Fake拥有List.of固定源；每次调用新建ArrayList结果容器，元素是原OrderSummary引用；Tools把同一结果列表交给调用者。",
+          "lifecycle": "源列表随Fake实例创建；result每次调用创建，循环add命中项，return后交给调用者；没有数据库或Connection。",
+          "failure": "合法无匹配返回空列表；参数/身份拒绝不遍历源。返回列表可变，修改其结构不修改源List.of；本例没有事务、持久化或重试。"
+        }
+      ]
+    },
+    {
+      "id": "conversation-state",
+      "title": "追加和读取会话消息",
+      "summary": "订单分发之外的第二项独立功能。全部方法依据源码静态推演；原实现无输入校验、可信用户绑定、容量、TTL或线程安全。",
+      "scenario": "调用者为room-a保存一句话，再读取同一键或不存在的键，理解状态保留和返回引用。",
+      "input": "新建ConversationMemory；append(\"room-a\",\"你好\")后load(\"room-a\")。key只是调用者字符串，不能认定为已认证会话ID。",
+      "expected": "同一键读取内部列表；缺省键得到空列表。修改已有键的返回列表会改变内部状态，此实现的边界需要学习者识别。",
+      "steps": [
+        {
+          "id": "append",
+          "title": "把消息追加到本会话",
+          "actor": "ConversationMemory",
+          "action": "进入append→computeIfAbsent→必要时新建列表→add→void返回。",
+          "input": "初始{}；key=\"room-a\"；message=\"你好\"",
+          "output": "{room-a:[你好]}",
+          "why": "用一组完整方法边界看见状态如何产生。",
+          "concept_ids": [
+            "collections-state",
+            "java-types"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/ConversationMemory.java",
+              "line": 12,
+              "quote": "        conversations.computeIfAbsent(key, ignored -> new ArrayList<>()).add(message);",
+              "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+            }
+          ],
+          "methods": [
+            {
+              "id": "append-enter",
+              "signature": "ConversationMemory.append(String, String)",
+              "relation": "call",
+              "input": "key=room-a；message=你好",
+              "output": "开始查找或建立该键的消息列表",
+              "why": "追加与读取是独立于订单的功能。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ConversationMemory.java",
+                  "line": 11,
+                  "quote": "    public void append(String key, String message) {",
+                  "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+                }
+              ]
+            },
+            {
+              "id": "map-compute",
+              "signature": "Map.computeIfAbsent(String, Function)",
+              "relation": "call",
+              "input": "当前conversations没有room-a",
+              "output": "准备调用缺省值工厂；已有键时直接取原列表",
+              "why": "只在缺失时建立容器。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ConversationMemory.java",
+                  "line": 12,
+                  "quote": "        conversations.computeIfAbsent(key, ignored -> new ArrayList<>()).add(message);",
+                  "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+                }
+              ]
+            },
+            {
+              "id": "list-create",
+              "signature": "ArrayList<String>()（缺省值工厂）",
+              "relation": "return",
+              "input": "缺省键room-a",
+              "output": "新空列表存入Map，同一引用返回给append",
+              "why": "Lambda只在缺省条件下执行，不是每次都new。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ConversationMemory.java",
+                  "line": 12,
+                  "quote": "        conversations.computeIfAbsent(key, ignored -> new ArrayList<>()).add(message);",
+                  "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+                }
+              ]
+            },
+            {
+              "id": "message-add",
+              "signature": "List.add(String)",
+              "relation": "return",
+              "input": "刚取得的列表；message=你好",
+              "output": "内部列表现在是[你好]",
+              "why": "是在列表上追加，不是覆盖整个会话。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ConversationMemory.java",
+                  "line": 12,
+                  "quote": "        conversations.computeIfAbsent(key, ignored -> new ArrayList<>()).add(message);",
+                  "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+                }
+              ]
+            },
+            {
+              "id": "append-return",
+              "signature": "ConversationMemory.append(String, String)",
+              "relation": "return",
+              "input": "状态已改变",
+              "output": "void返回调用者",
+              "why": "void无返回值，但对象状态发生变化。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ConversationMemory.java",
+                  "line": 11,
+                  "quote": "    public void append(String key, String message) {",
+                  "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "load",
+          "title": "再按同一键读取消息",
+          "actor": "ConversationMemory",
+          "action": "调用者另发起load；先求List.of()缺省实参，再getOrDefault，最后把选中列表返回。",
+          "input": "key=\"room-a\"，或新键\"room-z\"",
+          "output": "已有键返回[你好]；新键返回[]",
+          "why": "load不是append内部调用，也没有复制已有列表。",
+          "concept_ids": [
+            "collections-state",
+            "java-types"
+          ],
+          "evidence": [
+            {
+              "path": "src/main/java/demo/study/ConversationMemory.java",
+              "line": 16,
+              "quote": "        return conversations.getOrDefault(key, List.of());",
+              "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+            }
+          ],
+          "methods": [
+            {
+              "id": "load-enter",
+              "signature": "ConversationMemory.load(String)",
+              "relation": "call",
+              "input": "key=room-a或缺省room-z",
+              "output": "读取该键列表",
+              "why": "按会话键隔离状态。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ConversationMemory.java",
+                  "line": 15,
+                  "quote": "    public List<String> load(String key) {",
+                  "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+                }
+              ]
+            },
+            {
+              "id": "empty-list",
+              "signature": "List.of()",
+              "relation": "return",
+              "input": "无元素",
+              "output": "空的不可修改列表作为缺省实参",
+              "why": "Java先求实参再调用getOrDefault，已存在键也会求值这个表达式。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ConversationMemory.java",
+                  "line": 16,
+                  "quote": "        return conversations.getOrDefault(key, List.of());",
+                  "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+                }
+              ]
+            },
+            {
+              "id": "map-default",
+              "signature": "Map.getOrDefault(String, List<String>)",
+              "relation": "return",
+              "input": "键与已经生成的空缺省列表",
+              "output": "已有键返回内部列表；缺省键返回空列表，不写Map",
+              "why": "读取并不补建会话，已有与缺省的所有权不同。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ConversationMemory.java",
+                  "line": 16,
+                  "quote": "        return conversations.getOrDefault(key, List.of());",
+                  "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+                }
+              ]
+            },
+            {
+              "id": "load-return",
+              "signature": "ConversationMemory.load(String)",
+              "relation": "return",
+              "input": "选中的List<String>",
+              "output": "交还调用者；已有键仍与内部共享容器",
+              "why": "此处没有List.copyOf，外部可改变已有会话。",
+              "evidence": [
+                {
+                  "path": "src/main/java/demo/study/ConversationMemory.java",
+                  "line": 16,
+                  "quote": "        return conversations.getOrDefault(key, List.of());",
+                  "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "branches": [
+        {
+          "from_step_id": "append",
+          "condition": "key已有非null列表",
+          "outcome": "computeIfAbsent直接返回已有列表；ArrayList工厂未执行，再add到原列表。",
+          "skipped_step_ids": []
+        },
+        {
+          "from_step_id": "load",
+          "condition": "key不存在",
+          "outcome": "返回已经求值的List.of空列表，不向Map插入会话；并不是身份失败。",
+          "skipped_step_ids": []
+        }
+      ],
+      "trace_cases": [
+        {
+          "id": "append-read",
+          "title": "写入后读取原会话",
+          "input": "新实例先append(\"room-a\",\"你好\")，随后load(\"room-a\")。",
+          "result": "静态预测：load返回[你好]（同一个内部列表），conversations仍只有room-a；未执行Java。",
+          "frames": [
+            {
+              "step_id": "append",
+              "method_id": "append-enter",
+              "explanation": "调用者进入append，两个String参数原样传入。",
+              "values": [
+                {
+                  "name": "message",
+                  "type": "String",
+                  "value": "你好",
+                  "source": "调用者参数"
+                }
+              ]
+            },
+            {
+              "step_id": "append",
+              "method_id": "map-compute",
+              "explanation": "首次缺键，Map准备执行Lambda；现有键则跳过新建列表。",
+              "values": [
+                {
+                  "name": "conversations",
+                  "type": "Map<String,List<String>>",
+                  "value": "{}",
+                  "source": "当前实例字段"
+                }
+              ]
+            },
+            {
+              "step_id": "append",
+              "method_id": "list-create",
+              "explanation": "缺省Lambda创建空ArrayList，Map保存并返回它。",
+              "values": [
+                {
+                  "name": "messages",
+                  "type": "List<String>（ArrayList）",
+                  "value": "[]",
+                  "source": "缺省值工厂"
+                }
+              ]
+            },
+            {
+              "step_id": "append",
+              "method_id": "message-add",
+              "explanation": "在刚返回的列表调用add(你好)，改变内部状态。",
+              "values": [
+                {
+                  "name": "conversations",
+                  "type": "Map<String,List<String>>",
+                  "value": "{room-a:[你好]}",
+                  "source": "List.add副作用"
+                }
+              ]
+            },
+            {
+              "step_id": "append",
+              "method_id": "append-return",
+              "explanation": "append返回void，状态仍保留在这个实例内。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "void",
+                  "value": "无返回值",
+                  "source": "方法结束"
+                }
+              ]
+            },
+            {
+              "step_id": "load",
+              "method_id": "load-enter",
+              "explanation": "append结束后由调用者发起另一方法调用。",
+              "values": [
+                {
+                  "name": "key",
+                  "type": "String",
+                  "value": "room-a",
+                  "source": "这一次load参数"
+                }
+              ]
+            },
+            {
+              "step_id": "load",
+              "method_id": "empty-list",
+              "explanation": "先求缺省实参List.of()，它不会加入Map。",
+              "values": [
+                {
+                  "name": "defaultValue",
+                  "type": "List<String>",
+                  "value": "[]（不可修改）",
+                  "source": "List.of返回"
+                }
+              ]
+            },
+            {
+              "step_id": "load",
+              "method_id": "map-default",
+              "explanation": "Map选已存在的内部列表或缺省值，不创建新键。",
+              "values": [
+                {
+                  "name": "selected",
+                  "type": "List<String>",
+                  "value": "[你好]（同一个内部列表）",
+                  "source": "getOrDefault返回"
+                }
+              ]
+            },
+            {
+              "step_id": "load",
+              "method_id": "load-return",
+              "explanation": "同一个选中引用交给调用者；已有会话没有读取隔离。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "List<String>",
+                  "value": "[你好]（同一个内部列表）",
+                  "source": "load返回"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "missing-room",
+          "title": "读取不存在的会话不会创建它",
+          "input": "新实例先append(\"room-a\",\"你好\")，随后load(\"room-z\")。",
+          "result": "静态预测：load返回[]（缺省不可修改列表），conversations仍只有room-a；未执行Java。",
+          "frames": [
+            {
+              "step_id": "append",
+              "method_id": "append-enter",
+              "explanation": "调用者进入append，两个String参数原样传入。",
+              "values": [
+                {
+                  "name": "message",
+                  "type": "String",
+                  "value": "你好",
+                  "source": "调用者参数"
+                }
+              ]
+            },
+            {
+              "step_id": "append",
+              "method_id": "map-compute",
+              "explanation": "首次缺键，Map准备执行Lambda；现有键则跳过新建列表。",
+              "values": [
+                {
+                  "name": "conversations",
+                  "type": "Map<String,List<String>>",
+                  "value": "{}",
+                  "source": "当前实例字段"
+                }
+              ]
+            },
+            {
+              "step_id": "append",
+              "method_id": "list-create",
+              "explanation": "缺省Lambda创建空ArrayList，Map保存并返回它。",
+              "values": [
+                {
+                  "name": "messages",
+                  "type": "List<String>（ArrayList）",
+                  "value": "[]",
+                  "source": "缺省值工厂"
+                }
+              ]
+            },
+            {
+              "step_id": "append",
+              "method_id": "message-add",
+              "explanation": "在刚返回的列表调用add(你好)，改变内部状态。",
+              "values": [
+                {
+                  "name": "conversations",
+                  "type": "Map<String,List<String>>",
+                  "value": "{room-a:[你好]}",
+                  "source": "List.add副作用"
+                }
+              ]
+            },
+            {
+              "step_id": "append",
+              "method_id": "append-return",
+              "explanation": "append返回void，状态仍保留在这个实例内。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "void",
+                  "value": "无返回值",
+                  "source": "方法结束"
+                }
+              ]
+            },
+            {
+              "step_id": "load",
+              "method_id": "load-enter",
+              "explanation": "append结束后由调用者发起另一方法调用。",
+              "values": [
+                {
+                  "name": "key",
+                  "type": "String",
+                  "value": "room-z",
+                  "source": "这一次load参数"
+                }
+              ]
+            },
+            {
+              "step_id": "load",
+              "method_id": "empty-list",
+              "explanation": "先求缺省实参List.of()，它不会加入Map。",
+              "values": [
+                {
+                  "name": "defaultValue",
+                  "type": "List<String>",
+                  "value": "[]（不可修改）",
+                  "source": "List.of返回"
+                }
+              ]
+            },
+            {
+              "step_id": "load",
+              "method_id": "map-default",
+              "explanation": "Map选已存在的内部列表或缺省值，不创建新键。",
+              "values": [
+                {
+                  "name": "selected",
+                  "type": "List<String>",
+                  "value": "[]（缺省不可修改列表）",
+                  "source": "getOrDefault返回"
+                }
+              ]
+            },
+            {
+              "step_id": "load",
+              "method_id": "load-return",
+              "explanation": "同一个选中引用交给调用者；已有会话没有读取隔离。",
+              "values": [
+                {
+                  "name": "return",
+                  "type": "List<String>",
+                  "value": "[]（缺省不可修改列表）",
+                  "source": "load返回"
+                }
+              ]
+            }
+          ]
+        }
+      ],
+      "resources": [
+        {
+          "name": "会话Map与消息列表",
+          "ownership": "每个ConversationMemory实例拥有Map；已有键的load直接泄露内部可变列表引用。",
+          "lifecycle": "随实例创建，append增加消息，load不释放；没有TTL、容量上限、清理或持久化。",
+          "failure": "无输入校验和并发保护，不能承诺生产会话隔离。缺省List.of与已有ArrayList的可修改性不同。"
+        }
+      ]
+    }
+  ],
+  "project_summary": {
+    "purpose": "这是一段可以嵌入应用的 Java 小内核：把“查看我的订单”请求安全地交给业务服务，并用同一种结果格式返回。它还包含一个独立的会话消息存储示例。它不是一个可直接登录、聊天或付款的网站。",
+    "audience": "准备把自己做过的项目讲明白的学习者。使用订单功能的是已取得服务器身份的调用者；开发者负责在应用启动时提供身份上下文与服务实现。",
+    "scenario": "调用者交入工具名 list_my_orders 和空参数对象。若可信身份为 1001L，结果只包含订单1；若伪造 buyerId，校验器先拒绝，身份与服务都不读取。另一功能将一条文本追加到指定会话，随后按同一键读取。",
+    "capabilities": [
+      "按工具名分发只读本人订单请求",
+      "在调用业务前检查原始参数与可信身份",
+      "按当前买家ID筛选固定示例订单",
+      "把成功、业务拒绝和意外异常统一成 ToolResult",
+      "按会话键追加和读取消息，供分析状态与引用边界"
+    ],
+    "learning_value": "适合学会解释一条完整业务链：接口声明如何连接具体实现，校验为什么放在下游之前，身份为何不能来自模型参数，Long如何按值比较，失败怎样提前返回，集合引用怎样传递。代码很小，可以用三个具体输入手算并在练习区独立复现；无需先背完整框架。",
+    "limitations": "下面的流程是依据包内源码的静态教学推演。手动装配和可信上下文返回值是案例明确前提；源码没有 main、Spring、HTTP、JWT实现、SQL、真实模型协议、超时重试或生产日志。Fake固定两条订单；会话用普通HashMap，无并发安全、容量或TTL保证。引用校验与选择题通过不证明独立掌握。",
+    "evidence": [
+      {
+        "path": "README.md",
+        "line": 3,
+        "quote": "这是为拾阶另写的最小 Java 17 示例，不是完整 Spring 应用，不连接数据库或模型。用它练习 Map、接口、构造器注入、record、Long 的值比较、提前返回和异常边界。",
+        "sha256": "e7e7a8c31e3884199792152ad1b801fad17632fe179a168ca3e905d02fad4f29"
+      },
+      {
+        "path": "src/main/java/demo/study/ToolDispatcher.java",
+        "line": 14,
+        "quote": "    public ToolResult<?> dispatch(String toolName, Map<String, Object> arguments) {",
+        "sha256": "dfb5b7a5788a86de28018551ec364b1b85cf588f507154414c5569f9ae5b1adf"
+      },
+      {
+        "path": "src/main/java/demo/study/ConversationMemory.java",
+        "line": 11,
+        "quote": "    public void append(String key, String message) {",
+        "sha256": "18be503fdf846eff971e882009cf5dbd0d71cbc73ada01cd523f95abdf06689f"
+      }
+    ]
+  }
+}
